@@ -8,6 +8,8 @@ import torch
 from torchdrug import core
 from torchdrug.utils import comm
 
+from tqdm import tqdm
+
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from nbfnet import dataset, layer, model, task, util
 
@@ -20,10 +22,12 @@ def train_and_validate(cfg, solver):
     best_result = float("-inf")
     best_epoch = -1
 
-    for i in range(0, cfg.train.num_epoch, step):
+    for i in tqdm(range(0, cfg.train.num_epoch, step)):
         kwargs = cfg.train.copy()
         kwargs["num_epoch"] = min(step, cfg.train.num_epoch - i)
         solver.model.split = "train"
+        # import pdb
+        # pdb.set_trace()
         solver.train(**kwargs)
         solver.save("model_epoch_%d.pth" % solver.epoch)
         solver.model.split = "valid"

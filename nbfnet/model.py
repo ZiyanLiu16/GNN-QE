@@ -6,9 +6,12 @@ from torch import autograd
 
 from torch_scatter import scatter_add
 
-from torchdrug import core, layers
+from torchdrug import core, data, layers
 from torchdrug.layers import functional
 from torchdrug.core import Registry as R
+
+import pdb
+
 
 from . import layer
 
@@ -63,8 +66,13 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
             else:
                 pattern = torch.stack([h_index, t_index], dim=-1)
         pattern = pattern.flatten(0, -2)
+
+        # return edge index by pattern
         edge_index = graph.match(pattern)[0]
+
+        # binary mask
         edge_mask = ~functional.as_mask(edge_index, graph.num_edge)
+
         return graph.edge_mask(edge_mask)
 
     def negative_sample_to_tail(self, h_index, t_index, r_index):
@@ -106,12 +114,17 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
         step_graphs = []
         layer_input = boundary
 
-        for layer in self.layers:
+        for _, layer in enumerate(self.layers):
+            print(f"layer {_}")
             if separate_grad:
                 step_graph = graph.clone().requires_grad_()
             else:
                 step_graph = graph
+            print("step graph initiated")
+
             hidden = layer(step_graph, layer_input)
+            print("hidden layer generated")
+
             if self.short_cut and hidden.shape == layer_input.shape:
                 hidden = hidden + layer_input
             hiddens.append(hidden)
@@ -129,12 +142,13 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
             "step_graphs": step_graphs,
         }
 
-    def forward(self, graph, h_index, t_index, r_index=None, all_loss=None, metric=None):
+    def forward(self, graph: data.graph.Graph, h_index, t_index, r_index=None, all_loss=None, metric=None):
         if all_loss is not None:
             graph = self.remove_easy_edges(graph, h_index, t_index, r_index)
 
         shape = h_index.shape
         if graph.num_relation:
+            # new relation inverse
             graph = graph.undirected(add_inverse=True)
             h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
         else:
@@ -146,6 +160,7 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
         assert (h_index[:, [0]] == h_index).all()
         assert (r_index[:, [0]] == r_index).all()
         output = self.bellmanford(graph, h_index[:, 0], r_index[:, 0])
+
         feature = output["node_feature"].transpose(0, 1)
         index = t_index.unsqueeze(-1).expand(-1, -1, feature.shape[-1])
         feature = feature.gather(1, index)
