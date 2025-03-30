@@ -78,7 +78,14 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
     def negative_sample_to_tail(self, h_index, t_index, r_index):
         # convert p(h | t, r) to p(t' | h', r')
         # h' = t, r' = r^{-1}, t' = h
+
+        # if all head is the same -- i.e there is no head corruption
         is_t_neg = (h_index == h_index[:, [0]]).all(dim=-1, keepdim=True)
+
+        # for head corruption (not is_t_neg)
+        # transform it to the inverse relation so it's tail corrupted
+        # (h', r, t) -> (t, r^-1, h')
+        # now in the inverse relation, t is uncorrupted head
         new_h_index = torch.where(is_t_neg, h_index, t_index)
         new_t_index = torch.where(is_t_neg, t_index, h_index)
         new_r_index = torch.where(is_t_neg, r_index, r_index + self.num_relation)
@@ -104,16 +111,24 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
         query = self.query(r_index)
         index = h_index.unsqueeze(-1).expand_as(query)
         boundary = torch.zeros(graph.num_node, *query.shape, device=self.device)
+
+        # for the queries, add the query embedding to the corresponding head
         boundary.scatter_add_(0, index.unsqueeze(0), query.unsqueeze(0))
         with graph.graph():
             graph.query = query
         with graph.node():
             graph.boundary = boundary
 
+        # each hidden, for a certain node, its values is the same `dim` of query embedding
         hiddens = []
+        # each step_graph is a whole graph with values at certain step
         step_graphs = []
         layer_input = boundary
 
+        # note: even for 1p still multiple hops is useful because graph is not imcomplete, e.g.
+        # (Alice, WorksAt, Google) is learnt by
+        # (Alice, CollaboratesWith, Bob)
+        # (Bob, WorksAt, Google)
         for _, layer in enumerate(self.layers):
             print(f"layer {_}")
             if separate_grad:
@@ -125,6 +140,7 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
             hidden = layer(step_graph, layer_input)
             print("hidden layer generated")
 
+            # residual connection, very useful in case get pass true tail
             if self.short_cut and hidden.shape == layer_input.shape:
                 hidden = hidden + layer_input
             hiddens.append(hidden)
@@ -143,13 +159,18 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
         }
 
     def forward(self, graph: data.graph.Graph, h_index, t_index, r_index=None, all_loss=None, metric=None):
+        # graph.edge_list has all true relations
+        # (h_index, t_index, r_index) includes a set of relations, both true and false (negative) ones
+        
         if all_loss is not None:
             graph = self.remove_easy_edges(graph, h_index, t_index, r_index)
 
         shape = h_index.shape
+        # scalar
         if graph.num_relation:
-            # new relation inverse
+            # add new relation inverse
             graph = graph.undirected(add_inverse=True)
+
             h_index, t_index, r_index = self.negative_sample_to_tail(h_index, t_index, r_index)
         else:
             graph = self.as_relational_graph(graph)
@@ -159,6 +180,10 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
 
         assert (h_index[:, [0]] == h_index).all()
         assert (r_index[:, [0]] == r_index).all()
+
+        # pass true head and true relation, because all start with true head
+        # the output include both true and false tails (as positive and negative cases)
+        # design choice to have fixed number of hops
         output = self.bellmanford(graph, h_index[:, 0], r_index[:, 0])
 
         feature = output["node_feature"].transpose(0, 1)
