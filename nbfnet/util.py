@@ -95,7 +95,7 @@ def parse_args():
     return args, vars
 
 
-def build_solver(cfg, dataset):
+def build_solver(cfg, dataset) -> core.Engine:
     train_set, valid_set, test_set = dataset.split()
     if comm.get_rank() == 0:
         logger.warning(dataset)
