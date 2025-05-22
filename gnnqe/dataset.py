@@ -1,7 +1,9 @@
 import os
 import pickle
 from collections import defaultdict
+import random
 from tqdm import tqdm
+from typing import Optional
 
 import torch
 from torch.nn import functional as F
@@ -36,7 +38,9 @@ class LogicalQueryDataset(data.KnowledgeGraphDataset):
         ((("e", ("r", "n")), ("e", ("r", "n"))), ("n", "r")): "up-DM",
     }
 
-    def load_pickle(self, path, query_types=None, union_type="DNF", verbose=0):
+    def load_pickle(
+            self, path, query_types=None, union_type="DNF", verbose=0, mask_edge_ratio: Optional[float] = None
+    ):
         """
         Load the dataset from pickle dumps (BetaE format).
 
@@ -46,6 +50,8 @@ class LogicalQueryDataset(data.KnowledgeGraphDataset):
                 By default, load all query types.
             union_type (str, optional): which union type to use, ``DNF`` or ``DM``
             verbose (int, optional): output verbose level
+            mask_edge_ratio (int, optional): ratio to mask edges in training set, this is an implementation of
+                poisoning attack
         """
         query_types = query_types or self.struct2type.values()
         new_query_types = []
@@ -82,20 +88,15 @@ class LogicalQueryDataset(data.KnowledgeGraphDataset):
         # self.fact_graph is the training graph
         self.fact_graph = self.graph.edge_mask(fact_mask)
 
-        # import pandas as pd
-        # df_before_attack = pd.DataFrame(self.fact_graph._edge_list)
-
-        import random
-        random.seed(42)
-
-        # training
-        mask_ratio = 0.1
-        num_train_edges = self.fact_graph.num_edge.item()
-        edge_indexes = range(num_train_edges)
-        num_edges_left = int(num_train_edges * (1 - mask_ratio))
-        edge_indexes_after_attack = random.sample(edge_indexes, num_edges_left)
-        self.fact_graph = self.fact_graph.edge_mask(edge_indexes_after_attack)
-        # df_post_attack = pd.DataFrame(self.fact_graph._edge_list)
+        if mask_edge_ratio:
+            random.seed(42)
+            # training
+            mask_ratio = 0.1
+            num_train_edges = self.fact_graph.num_edge.item()
+            edge_indexes = range(num_train_edges)
+            num_edges_left = int(num_train_edges * (1 - mask_ratio))
+            edge_indexes_after_attack = random.sample(edge_indexes, num_edges_left)
+            self.fact_graph = self.fact_graph.edge_mask(edge_indexes_after_attack)
 
         queries = []
         types = []
