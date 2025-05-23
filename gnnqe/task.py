@@ -44,6 +44,10 @@ class LogicalQuery(tasks.Task, core.Configurable):
         self.id2type = dataset.id2type
         self.type2id = dataset.type2id
 
+        # TODO (ziyan): graph registered here
+        #   see dataset
+        # self.graph is the full graph without missing edges
+        # self.fact_graph is the training graph
         self.register_buffer("fact_graph", dataset.fact_graph)
         self.register_buffer("graph", dataset.graph)
 
@@ -53,37 +57,11 @@ class LogicalQuery(tasks.Task, core.Configurable):
         all_loss = torch.tensor(0, dtype=torch.float32, device=self.device)
         metric = {}
 
+        # pred: [batch_size, num_entities]
+        # target: [batch_size, num_entities]
         pred, target = self.predict_and_target(batch, all_loss, metric)
 
-        for criterion, weight in self.criterion.items():
-            if criterion == "bce":
-                loss = F.binary_cross_entropy_with_logits(pred, target, reduction="none")
-
-                is_positive = target > 0.5
-                is_negative = target <= 0.5
-                num_positive = is_positive.sum(dim=-1)
-                num_negative = is_negative.sum(dim=-1)
-                neg_weight = torch.zeros_like(pred)
-                neg_weight[is_positive] = (1 / num_positive.float()).repeat_interleave(num_positive)
-                if self.adversarial_temperature > 0:
-                    with torch.no_grad():
-                        logit = pred[is_negative] / self.adversarial_temperature
-                        neg_weight[is_negative] = functional.variadic_softmax(logit, num_negative)
-                else:
-                    neg_weight[is_negative] = (1 / num_negative.float()).repeat_interleave(num_negative)
-                loss = (loss * neg_weight).sum(dim=-1) / neg_weight.sum(dim=-1)
-            else:
-                raise ValueError("Unknown criterion `%s`" % criterion)
-
-            if self.sample_weight:
-                sample_weight = target.sum(dim=-1).float()
-                loss = (loss * sample_weight).sum() / sample_weight.sum()
-            else:
-                loss = loss.mean()
-
-            name = tasks._get_criterion_name(criterion)
-            metric[name] = loss
-            all_loss += loss * weight
+        all_loss, metric = self.calculate_loss(pred, target, metric, all_loss)
 
         return all_loss, metric
 
@@ -99,6 +77,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
             ranking = self.batch_evaluate(pred, target)
             # answer set cardinality prediction
             prob = F.sigmoid(pred)
+            # TODO: maintain probability
             num_pred = (prob * (prob > 0.5)).sum(dim=-1)
             num_easy = easy_answer.sum(dim=-1)
             num_hard = hard_answer.sum(dim=-1)
@@ -183,3 +162,36 @@ class LogicalQuery(tasks.Task, core.Configurable):
     def visualize(self, batch):
         query = batch["query"]
         return self.model.visualize(self.fact_graph, self.graph, query)
+
+    def calculate_loss(self, pred: torch.tensor, target: torch.tensor, metric: dict, all_loss: torch.tensor):
+        for criterion, weight in self.criterion.items():
+            if criterion == "bce":
+                loss = F.binary_cross_entropy_with_logits(pred, target, reduction="none")
+
+                is_positive = target > 0.5
+                is_negative = target <= 0.5
+                num_positive = is_positive.sum(dim=-1)
+                num_negative = is_negative.sum(dim=-1)
+                neg_weight = torch.zeros_like(pred)
+                neg_weight[is_positive] = (1 / num_positive.float()).repeat_interleave(num_positive)
+                if self.adversarial_temperature > 0:
+                    with torch.no_grad():
+                        logit = pred[is_negative] / self.adversarial_temperature
+                        neg_weight[is_negative] = functional.variadic_softmax(logit, num_negative)
+                else:
+                    neg_weight[is_negative] = (1 / num_negative.float()).repeat_interleave(num_negative)
+                loss = (loss * neg_weight).sum(dim=-1) / neg_weight.sum(dim=-1)
+            else:
+                raise ValueError("Unknown criterion `%s`" % criterion)
+
+            if self.sample_weight:
+                sample_weight = target.sum(dim=-1).float()
+                loss = (loss * sample_weight).sum() / sample_weight.sum()
+            else:
+                loss = loss.mean()
+
+            name = tasks._get_criterion_name(criterion)
+            metric[name] = loss
+            all_loss += loss * weight
+
+        return all_loss, metric
