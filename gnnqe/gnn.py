@@ -75,6 +75,7 @@ class CompositionalGraphConvolutionalNetwork(nn.Module, core.Configurable):
 
         self.layers = nn.ModuleList()
         for i in range(len(self.dims) - 1):
+            # TODO (ziyan): message and aggregate in CompositionalGraphConv
             self.layers.append(layer.CompositionalGraphConv(self.dims[i], self.dims[i + 1], num_relation,
                                                             message_func, layer_norm, activation))
         self.relation = nn.Embedding(num_relation, input_dim)
