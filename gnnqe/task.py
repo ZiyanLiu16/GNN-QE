@@ -22,17 +22,29 @@ class LogicalQuery(tasks.Task, core.Configurable):
         adversarial_temperature (float, optional): temperature for self-adversarial negative sampling.
             Set ``0`` to disable self-adversarial negative sampling.
         sample_weight (bool, optional): whether to weight each query by its number of answers
+        noise_level: factor to scale input perturbation
+        adversarial_strength: scalar of loss from perturbed inputs
     """
 
     _option_members = ["criterion", "metric", "query_type_weight"]
 
-    def __init__(self, model, criterion="bce", metric=("mrr",), adversarial_temperature=0, sample_weight=False):
+    def __init__(
+            self,
+            model,
+            noise_level: float,
+            adversarial_strength: float,
+            criterion="bce",
+            metric=("mrr",),
+            adversarial_temperature=0, sample_weight=False
+    ):
         super(LogicalQuery, self).__init__()
         self.model = model
         self.criterion = criterion
         self.metric = metric
         self.adversarial_temperature = adversarial_temperature
         self.sample_weight = sample_weight
+        self.noise_level = noise_level
+        self.adversarial_strength = adversarial_strength
 
     def preprocess(self, train_set, valid_set, test_set):
         if isinstance(train_set, torch_data.Subset):
@@ -59,11 +71,34 @@ class LogicalQuery(tasks.Task, core.Configurable):
 
         # pred: [batch_size, num_entities]
         # target: [batch_size, num_entities]
+        # this function is also the predict function during inference,
+        # see torchdrug.core.engine.Engine.evaluate
         pred, target = self.predict_and_target(batch, all_loss, metric)
 
         all_loss, metric = self.calculate_loss(pred, target, metric, all_loss)
 
-        return all_loss, metric
+        all_loss.backward(retain_graph=True)
+        perturb = self._calculate_perturbation(self.model.model.query)
+        with torch.no_grad():
+            self.model.model.query.weight += perturb
+
+        # all_loss is not used or changed in CompositionalGraphConvolutionalNetwork so really doesn't matter
+        # this is mainly to have correct all_loss_perturbed
+        loss_perturbed = torch.tensor(0, dtype=torch.float32, device=self.device)
+        pred_perturbed, _ = self.predict_and_target(batch, loss_perturbed, metric)
+        # TODO (ziyan): determine metrics for training. Currently, only metrics from valid and test is logged.
+        all_loss_perturbed, metric = self.calculate_loss(pred_perturbed, target, metric, loss_perturbed)
+
+        loss_total = all_loss + self.adversarial_strength * all_loss_perturbed
+
+        return loss_total, metric
+
+    def _calculate_perturbation(self, target):
+        if isinstance(target, torch.nn.modules.sparse.Embedding):
+            grad = target.weight.grad
+        else:
+            grad = target.grad
+        return self.noise_level * grad / (grad.norm(p=2, dim=1, keepdim=True) + 1e-8)
 
     def predict_and_target(self, batch, all_loss=None, metric=None):
         query = batch["query"]

@@ -32,6 +32,7 @@ RUN mkdir -p /data
 # Clone repositories
 WORKDIR /workspace
 RUN git clone https://github.com/ZiyanLiu16/GNN-QE.git
+RUN cd GNN-QE && git pull && git checkout zl/adversarial_training
 # RUN cd GNN-QE
 # RUN git pull
 # RUN git checkout zl/mask_edge_attack

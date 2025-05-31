@@ -22,6 +22,8 @@ task:
   criterion: bce
   sample_weight: no
   adversarial_temperature: 0.2
+  noise_level: .5
+  adversarial_strength: 1.0
 
 optimizer:
   class: Adam
