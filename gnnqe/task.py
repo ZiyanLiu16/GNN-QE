@@ -79,13 +79,13 @@ class LogicalQuery(tasks.Task, core.Configurable):
 
         all_loss.backward(retain_graph=True)
         perturb = self._calculate_perturbation(self.model.model.query)
-        with torch.no_grad():
-            self.model.model.query.weight += perturb
+        self.model.model.query_override = self.model.model.query.weight.detach().clone() + perturb
 
         # all_loss is not used or changed in CompositionalGraphConvolutionalNetwork so really doesn't matter
         # this is mainly to have correct all_loss_perturbed
         loss_perturbed = torch.tensor(0, dtype=torch.float32, device=self.device)
         pred_perturbed, _ = self.predict_and_target(batch, loss_perturbed, metric)
+        del self.model.model.query_override
         # TODO (ziyan): determine metrics for training. Currently, only metrics from valid and test is logged.
         all_loss_perturbed, metric = self.calculate_loss(pred_perturbed, target, metric, loss_perturbed)
 

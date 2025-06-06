@@ -165,6 +165,7 @@ class QueryExecutor(nn.Module, core.Configurable):
 
         # detach the variable to stabilize training
         h_prob = h_prob.detach()
+        # this projection can happen multiple times during forward.
         t_prob = self.model(graph, h_prob, r_index, all_loss=all_loss, metric=metric)
         sym_t_prob = self.symbolic_model(graph, sym_h_prob, r_index, all_loss=all_loss, metric=metric)
 
@@ -209,7 +210,11 @@ class RelationProjection(nn.Module, core.Configurable):
         self.mlp = layers.MLP(model.output_dim, [model.output_dim] * (num_mlp_layer - 1) + [1])
 
     def forward(self, graph, h_prob, r_index, all_loss=None, metric=None):
-        query = self.query(r_index)
+        if hasattr(self, "query_override"):
+            query = self.query_override[r_index]
+        else:
+            query = self.query(r_index)
+
         graph = graph.clone()
         with graph.graph():
             graph.query = query

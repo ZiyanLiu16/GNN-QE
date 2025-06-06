@@ -25,6 +25,7 @@ def train_and_validate(cfg, solver):
         kwargs["num_epoch"] = min(step, cfg.train.num_epoch - i)
         solver.train(**kwargs)
         solver.save("model_epoch_%d.pth" % solver.epoch)
+        # here the model from the epoch with the best valid mrr is returned (for later evaluation)
         metric = solver.evaluate("valid")
         result = metric[cfg.metric]
         if result > best_result:
