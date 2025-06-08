@@ -86,7 +86,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
         pred, target = self.predict_and_target(batch, all_loss, metric)
 
         all_loss, metric = self.calculate_loss(pred, target, metric, all_loss)
-        
+
         if self.perturb_target:
             all_loss.backward(retain_graph=True)
             # TODO: consolidate this to _generate_perturbed_layer and test
@@ -100,7 +100,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
                 perturbed_layer = self._generate_perturbed_layer(
                     original_layer=self.model.model.model.layers[0].relation_linear,
                     perturb=(weight_perturb, bias_perturb),
-                )
+                ).to(self.device)
                 self.model.model.model.perturbed_layer = perturbed_layer
 
         if self.perturb_target:
