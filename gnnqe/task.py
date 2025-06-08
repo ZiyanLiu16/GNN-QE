@@ -1,3 +1,5 @@
+from typing import Optional
+
 import torch
 from torch.nn import functional as F
 from torch.utils import data as torch_data
@@ -7,6 +9,8 @@ from torch_scatter import scatter_add, scatter_mean
 from torchdrug import core, tasks, metrics
 from torchdrug.layers import functional
 from torchdrug.core import Registry as R
+
+VALID_PERTURB_TARGET = ("relation_emb", "relation_linear")
 
 
 @R.register("task.LogicalQuery")
@@ -24,6 +28,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
         sample_weight (bool, optional): whether to weight each query by its number of answers
         noise_level: factor to scale input perturbation
         adversarial_strength: scalar of loss from perturbed inputs
+        perturb_target: the parameters to apply perturbation on.
     """
 
     _option_members = ["criterion", "metric", "query_type_weight"]
@@ -35,7 +40,9 @@ class LogicalQuery(tasks.Task, core.Configurable):
             adversarial_strength: float,
             criterion="bce",
             metric=("mrr",),
-            adversarial_temperature=0, sample_weight=False
+            adversarial_temperature=0,
+            perturb_target: Optional[str] = None,
+            sample_weight=False
     ):
         super(LogicalQuery, self).__init__()
         self.model = model
@@ -45,6 +52,9 @@ class LogicalQuery(tasks.Task, core.Configurable):
         self.sample_weight = sample_weight
         self.noise_level = noise_level
         self.adversarial_strength = adversarial_strength
+        if perturb_target and perturb_target not in VALID_PERTURB_TARGET:
+            raise ValueError(f"unrecognized perturb target: {perturb_target}")
+        self.perturb_target = perturb_target
 
     def preprocess(self, train_set, valid_set, test_set):
         if isinstance(train_set, torch_data.Subset):
@@ -76,29 +86,70 @@ class LogicalQuery(tasks.Task, core.Configurable):
         pred, target = self.predict_and_target(batch, all_loss, metric)
 
         all_loss, metric = self.calculate_loss(pred, target, metric, all_loss)
+        
+        if self.perturb_target:
+            all_loss.backward(retain_graph=True)
+            # TODO: consolidate this to _generate_perturbed_layer and test
+            if self.perturb_target == "relation_emb":
+                perturb = self._calculate_perturbation(self.model.model.query)
+                self.model.model.query_override = self.model.model.query.weight.detach().clone() + perturb
+            if self.perturb_target == "relation_linear":
+                weight_perturb, bias_perturb = self._calculate_perturbation(
+                    self.model.model.model.layers[0].relation_linear
+                )
+                perturbed_layer = self._generate_perturbed_layer(
+                    original_layer=self.model.model.model.layers[0].relation_linear,
+                    perturb=(weight_perturb, bias_perturb),
+                )
+                self.model.model.model.perturbed_layer = perturbed_layer
 
-        all_loss.backward(retain_graph=True)
-        perturb = self._calculate_perturbation(self.model.model.query)
-        self.model.model.query_override = self.model.model.query.weight.detach().clone() + perturb
+        if self.perturb_target:
+            # all_loss is not used or changed in CompositionalGraphConvolutionalNetwork so really doesn't matter
+            # this is mainly to have correct all_loss_perturbed
+            loss_perturbed = torch.tensor(0, dtype=torch.float32, device=self.device)
+            pred_perturbed, _ = self.predict_and_target(batch, loss_perturbed, metric)
+            if self.perturb_target == "relation_emb":
+                del self.model.model.query_override
+            elif self.perturb_target == "relation_linear":
+                del self.model.model.model.perturbed_layer
 
-        # all_loss is not used or changed in CompositionalGraphConvolutionalNetwork so really doesn't matter
-        # this is mainly to have correct all_loss_perturbed
-        loss_perturbed = torch.tensor(0, dtype=torch.float32, device=self.device)
-        pred_perturbed, _ = self.predict_and_target(batch, loss_perturbed, metric)
-        del self.model.model.query_override
-        # TODO (ziyan): determine metrics for training. Currently, only metrics from valid and test is logged.
-        all_loss_perturbed, metric = self.calculate_loss(pred_perturbed, target, metric, loss_perturbed)
+            # TODO (ziyan): determine metrics for training. Currently, only metrics from valid and test is logged.
+            all_loss_perturbed, metric = self.calculate_loss(pred_perturbed, target, metric, loss_perturbed)
+            # todo: check weights
+            loss_total = all_loss + self.adversarial_strength * all_loss_perturbed
 
-        loss_total = all_loss + self.adversarial_strength * all_loss_perturbed
+            return loss_total, metric
 
-        return loss_total, metric
+        return all_loss, metric
 
     def _calculate_perturbation(self, target):
         if isinstance(target, torch.nn.modules.sparse.Embedding):
             grad = target.weight.grad
+        elif isinstance(target, torch.nn.modules.linear.Linear):
+            weight_grad = target.weight.grad
+            bias_grad = target.bias.grad
+            return (
+                self.noise_level * weight_grad / (weight_grad.norm(p=2, dim=1, keepdim=True) + 1e-8),
+                self.noise_level * bias_grad / (bias_grad.norm(p=2, keepdim=True) + 1e-8),
+            )
         else:
             grad = target.grad
         return self.noise_level * grad / (grad.norm(p=2, dim=1, keepdim=True) + 1e-8)
+
+    @staticmethod
+    def _generate_perturbed_layer(original_layer, perturb):
+        weight_perturb, bias_perturb = perturb
+
+        perturbed_layer = torch.nn.Linear(
+            in_features=original_layer.in_features,
+            out_features=original_layer.out_features,
+            bias=original_layer.bias is not None
+        )
+        with torch.no_grad():
+            perturbed_layer.weight.copy_(original_layer.weight + weight_perturb)
+            if original_layer.bias is not None:
+                perturbed_layer.bias.copy_(original_layer.bias + bias_perturb)
+        return perturbed_layer
 
     def predict_and_target(self, batch, all_loss=None, metric=None):
         query = batch["query"]

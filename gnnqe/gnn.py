@@ -33,6 +33,10 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
                                                                activation, dependent))
 
     def forward(self, graph, input, all_loss=None, metric=None):
+        if hasattr(self, "perturbed_layer"):
+            original_layer = self.layers[0].relation_linear
+            self.layers[0].relation_linear = self.perturbed_layer
+
         with graph.node():
             graph.boundary = input
         hiddens = []
@@ -50,6 +54,9 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
             node_feature = torch.cat(hiddens + [node_query], dim=-1)
         else:
             node_feature = torch.cat([hiddens[-1], node_query], dim=-1)
+
+        if hasattr(self, "perturbed_layer"):
+            self.layers[0].relation_linear = original_layer
 
         return {
             "node_feature": node_feature,
