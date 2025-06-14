@@ -11,10 +11,9 @@ from torchdrug import core, tasks, metrics
 from torchdrug.layers import functional
 from torchdrug.core import Registry as R
 
-VALID_PERTURB_TARGET = ("relation_emb", "relation_linear", "relation_linear_all")
-
 
 class PerturbTarget(Enum):
+    LINEAR = "linear"
     RELATION_EMB = "relation_emb"
     RELATION_LINEAR = "relation_linear"
     RELATION_LINEAR_ALL = "relation_linear_all"
@@ -118,6 +117,15 @@ class LogicalQuery(tasks.Task, core.Configurable):
                         perturb=perturbs,
                     ).to(self.device)
                     self.model.model.model.perturbed_layers.append(perturbed_layer)
+            if self.perturb_target == PerturbTarget.LINEAR.value:
+                perturbs = self._calculate_perturbation(
+                    self.model.model.model.layers[0].linear
+                )
+                perturbed_layer = self._generate_perturbed_layer(
+                    original_layer=self.model.model.model.layers[0].linear,
+                    perturb=perturbs
+                ).to(self.device)
+                self.model.model.model.perturbed_linear = perturbed_layer
 
         if self.perturb_target:
             # all_loss is not used or changed in CompositionalGraphConvolutionalNetwork so really doesn't matter
@@ -130,6 +138,8 @@ class LogicalQuery(tasks.Task, core.Configurable):
                 del self.model.model.model.perturbed_layer
             elif self.perturb_target == PerturbTarget.RELATION_LINEAR_ALL.value:
                 del self.model.model.model.perturbed_layers
+            elif self.perturb_target == PerturbTarget.Linear.value:
+                del self.model.model.model.perturbed_linear
 
             # TODO (ziyan): determine metrics for training. Currently, only metrics from valid and test is logged.
             all_loss_perturbed, metric = self.calculate_loss(pred_perturbed, target, metric, loss_perturbed)

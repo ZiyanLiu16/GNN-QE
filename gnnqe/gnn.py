@@ -41,6 +41,9 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
             for i in range(len(self.perturbed_layers)):
                 original_layers.append(self.layers[i].relation_linear)
                 self.layers[i].relation_linear = self.perturbed_layers[i]
+        if hasattr(self, "perturbed_linear"):
+            original_layer = self.layers[0].linear
+            self.layers[0].linear = self.perturbed_linear
 
         with graph.node():
             graph.boundary = input
@@ -65,6 +68,8 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
         if hasattr(self, "perturbed_layers"):
             for i in range(len(self.perturbed_layers)):
                 self.layers[i].relation_linear = original_layers[i]
+        if hasattr(self, "perturbed_linear"):
+            self.layers[0].linear = original_layer
 
         return {
             "node_feature": node_feature,

@@ -23,8 +23,8 @@ task:
   sample_weight: no
   adversarial_temperature: 0.2
   noise_level: .5
-  adversarial_strength: 1.0
-  perturb_target: relation_linear_all # see VALID_PERTURB_TARGET,
+  adversarial_strength: 0.5
+  perturb_target: linear # see PerturbTarget,
 
 optimizer:
   class: Adam
