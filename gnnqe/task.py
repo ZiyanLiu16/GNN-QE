@@ -138,7 +138,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
                 del self.model.model.model.perturbed_layer
             elif self.perturb_target == PerturbTarget.RELATION_LINEAR_ALL.value:
                 del self.model.model.model.perturbed_layers
-            elif self.perturb_target == PerturbTarget.Linear.value:
+            elif self.perturb_target == PerturbTarget.LINEAR.value:
                 del self.model.model.model.perturbed_linear
 
             # TODO (ziyan): determine metrics for training. Currently, only metrics from valid and test is logged.
