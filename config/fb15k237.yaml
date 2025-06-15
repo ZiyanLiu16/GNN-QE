@@ -25,6 +25,7 @@ task:
   noise_level: .5
   adversarial_strength: 0.5
   perturb_target: linear # see PerturbTarget,
+  mutual_info_weighted_perturb: False
 
 optimizer:
   class: Adam

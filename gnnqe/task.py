@@ -13,6 +13,7 @@ from torchdrug.core import Registry as R
 
 
 class PerturbTarget(Enum):
+    EDGE_EMB = "edge_emb"
     LINEAR = "linear"
     RELATION_EMB = "relation_emb"
     RELATION_LINEAR = "relation_linear"
@@ -44,11 +45,12 @@ class LogicalQuery(tasks.Task, core.Configurable):
             model,
             noise_level: float,
             adversarial_strength: float,
+            mutual_info_weighted_perturb: bool,
             criterion="bce",
             metric=("mrr",),
             adversarial_temperature=0,
             perturb_target: Optional[str] = None,
-            sample_weight=False
+            sample_weight=False,
     ):
         super(LogicalQuery, self).__init__()
         self.model = model
@@ -59,6 +61,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
         self.noise_level = noise_level
         self.adversarial_strength = adversarial_strength
         self.perturb_target = perturb_target
+        self.mutual_info_weighted_perturb = mutual_info_weighted_perturb
 
     def preprocess(self, train_set, valid_set, test_set):
         if isinstance(train_set, torch_data.Subset):
@@ -151,8 +154,9 @@ class LogicalQuery(tasks.Task, core.Configurable):
         return all_loss, metric
 
     def _calculate_perturbation(self, target):
-        if isinstance(target, torch.nn.modules.sparse.Embedding):
+        if self.perturb_target == PerturbTarget.RELATION_EMB.value:
             grad = target.weight.grad
+            return grad / (grad.norm(p=2, dim=1, keepdim=True) + 1e-8)
         elif isinstance(target, torch.nn.modules.linear.Linear):
             weight_grad = target.weight.grad
             bias_grad = target.bias.grad
@@ -160,9 +164,17 @@ class LogicalQuery(tasks.Task, core.Configurable):
                 self.noise_level * weight_grad / (weight_grad.norm(p=2, dim=1, keepdim=True) + 1e-8),
                 self.noise_level * bias_grad / (bias_grad.norm(p=2, keepdim=True) + 1e-8),
             )
+        elif self.perturb_target == PerturbTarget.EDGE_EMB.value:
+            # TODO: apply weights to edge embedding.
+            if self.mutual_info_weighted_perturb:
+                mi = calculate_mutual_information_matrix(
+                    edge_index=self.graph._edge_list[:, :2].t(),
+                    edge_weight=self.graph._edge_weight,
+                    num_nodes=int(self.graph.num_node),
+                )
+                weights = 1 - mi / mi.max()
         else:
-            grad = target.grad
-        return self.noise_level * grad / (grad.norm(p=2, dim=1, keepdim=True) + 1e-8)
+            raise ValueError(f"Unidentified types of perturbation target: {target}")
 
     @staticmethod
     def _generate_perturbed_layer(original_layer, perturb):
@@ -309,3 +321,49 @@ class LogicalQuery(tasks.Task, core.Configurable):
             all_loss += loss * weight
 
         return all_loss, metric
+
+
+def calculate_mutual_information_matrix(edge_index, edge_weight, num_nodes):
+    adj_matrix = retrieve_adjacency_matrix(edge_index=edge_index, edge_weight=edge_weight, num_nodes=num_nodes)
+    trans_prob_matrix = compute_transition_matrix(adj_matrix)
+    # T is order
+    T = 2
+    for _, t in enumerate(range(T)):
+        if _ == 0:
+            M = trans_prob_matrix
+        else:
+            M += torch.matrix_power(trans_prob_matrix, n=t+1)
+
+    # sum to reduce the rows
+    M_row_sum = M.sum(dim=0, keepdim=True) + 1e-8  # prevent division by 0
+    M_norm = M / M_row_sum
+    # TODO: verify this in paper
+    beta = 1 / num_nodes
+    beta_tensor = torch.tensor(beta, device=M_norm.device, dtype=M_norm.dtype)
+    mi = torch.log(M_norm) - torch.log(beta_tensor)
+    mi = torch.clamp(mi, min=0)
+    return mi
+
+
+def retrieve_adjacency_matrix(edge_index, edge_weight, num_nodes):
+    # TODO: the original method is applied on a undirected graph in the first place. This graph is directed.
+    #  Consider force to be a undirected graph.
+    #  However directly graph may be a more accurate.
+    #  This aligns with the decision on the edge embedding initiation.
+
+    adj_sparse = torch.sparse_coo_tensor(
+        indices=edge_index,
+        values=edge_weight,
+        size=(num_nodes, num_nodes)
+        # coalesce remove duplicated pairs of indices but reflect the multiple occurrences in matrix values
+        # by summing up their values. All original values (edge_weight) is 1.
+    ).coalesce()
+    return adj_sparse
+
+
+def compute_transition_matrix(adj_matrix):
+    # TODO: consider parse matrix implementation.
+    adj_dense = adj_matrix.to_dense()
+    row_sum = adj_dense.sum(dim=1, keepdim=True) + 1e-10
+    return adj_dense / row_sum
+

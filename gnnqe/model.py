@@ -206,6 +206,7 @@ class RelationProjection(nn.Module, core.Configurable):
     def __init__(self, model, num_mlp_layer=2):
         super(RelationProjection, self).__init__()
         self.model = model
+        # model.num_relation is number of the unique types of relation
         self.query = nn.Embedding(model.num_relation, model.input_dim)
         self.mlp = layers.MLP(model.output_dim, [model.output_dim] * (num_mlp_layer - 1) + [1])
 
