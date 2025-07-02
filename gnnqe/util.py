@@ -115,7 +115,8 @@ def build_solver(cfg, dataset):
     optimizer = core.Configurable.load_config_dict(cfg.optimizer)
     solver = core.Engine(task, train_set, valid_set, test_set, optimizer, **cfg.engine)
 
-    if "checkpoint" in cfg:
-        solver.load(cfg.checkpoint)
+    if "evaluate" in cfg and "checkpoint" in cfg.evaluate:
+        solver.load(cfg.evaluate.checkpoint)
 
     return solver
+

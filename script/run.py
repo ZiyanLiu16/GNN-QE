@@ -10,6 +10,7 @@ from torchdrug.utils import comm
 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from gnnqe import dataset, gnn, model, task, util
+from gnnqe.attack import RelationEmbAttacker
 
 
 def train_and_validate(cfg, solver):
@@ -57,5 +58,12 @@ if __name__ == "__main__":
     dataset = core.Configurable.load_config_dict(cfg.dataset)
     solver = util.build_solver(cfg, dataset)
 
-    train_and_validate(cfg, solver)
+    if not cfg.evaluate:
+        train_and_validate(cfg, solver)
+
+    if cfg.evaluate and cfg.evaluate.attack_method:
+        attacker = RelationEmbAttacker(solver.model.model.model)
+        if cfg.evaluate.attack_method == "relation_emb_random":
+            attacker.random_attack(scale=cfg.evaluate.attack_scale)
+
     test(cfg, solver)
