@@ -43,5 +43,5 @@ metric: mrr
 
 evaluate:
   checkpoint: ~/projects/graph_neural_network_query_executor/models/model_original/model_epoch_10.pth
-  attack_method: relation_emb_random
+  attack_method: relation_emb_fga #relation_emb_random
   attack_scale: 0.4

@@ -15,6 +15,8 @@ from torch import distributed as dist
 from torchdrug import core, utils
 from torchdrug.utils import comm
 
+from gnnqe.attack import AdversarialEngine
+
 
 logger = logging.getLogger(__file__)
 
@@ -113,7 +115,7 @@ def build_solver(cfg, dataset):
     task = core.Configurable.load_config_dict(cfg.task)
     cfg.optimizer.params = task.parameters()
     optimizer = core.Configurable.load_config_dict(cfg.optimizer)
-    solver = core.Engine(task, train_set, valid_set, test_set, optimizer, **cfg.engine)
+    solver = AdversarialEngine(task, train_set, valid_set, test_set, optimizer, **cfg.engine)
 
     if "evaluate" in cfg and "checkpoint" in cfg.evaluate:
         solver.load(cfg.evaluate.checkpoint)
