@@ -58,17 +58,12 @@ class AdversarialEngine(core.Engine):
             ):
                 model.zero_grad()
                 all_loss = torch.tensor(0, dtype=torch.float32, device=self.device)
-                print("requires_grad:", all_loss.requires_grad)
-                print("all_loss grad_fn:", all_loss.grad_fn)
                 metric = {}
                 pred, target = model.predict_and_target(batch, all_loss, metric)
                 all_loss, metric = model.calculate_loss(pred, target, metric, all_loss)
-                print("requires_grad after return:", all_loss.requires_grad)
-                print("all_loss grad_fn after return:", all_loss.grad_fn)
                 all_loss.backward()
 
             perturb = self.calculate_attack_perturbation(model.model.model.query, attack_method, attack_scale)
-            print("perturb:", perturb)
             model.model.model.query_override = model.model.model.query.weight.detach().clone() + perturb
 
             with torch.no_grad():
