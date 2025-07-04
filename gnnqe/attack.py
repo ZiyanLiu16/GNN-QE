@@ -72,7 +72,11 @@ class AdversarialEngine(core.Engine):
             preds.append(pred)
             targets.append(target)
 
-            if attack_method in (AttackMethod.RELATION_EMB_RANDOM.value, AttackMethod.RELATION_EMB_FGA.value):
+            if attack_method in (
+                    AttackMethod.RELATION_EMB_RANDOM.value,
+                    AttackMethod.RELATION_EMB_FGA.value,
+                    AttackMethod.RELATION_EMB_NORM2.value,
+            ):
                 del model.model.model.query_override
 
         pred = utils.cat(preds)
