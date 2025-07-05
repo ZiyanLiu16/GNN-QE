@@ -39,8 +39,8 @@ def train_and_validate(cfg, solver):
 def test(cfg, solver):
     solver.model.metric = ("mrr", "hits@1", "mape", "spearmanr")
     if cfg.evaluate and cfg.evaluate.attack_method:
-        solver.evaluate("valid", cfg.evaluate.attack_method, cfg.evaluate.attack_scale)
-        solver.evaluate("test", cfg.evaluate.attack_method, cfg.evaluate.attack_scale)
+        solver.evaluate("valid", **dict(cfg.evaluate))
+        solver.evaluate("test", **dict(cfg.evaluate))
     else:
         solver.evaluate("valid")
         solver.evaluate("test")

@@ -17,6 +17,7 @@ class AttackMethod(Enum):
     RELATION_EMB_RANDOM = "relation_emb_random"
     RELATION_EMB_NORM2 = "relation_emb_norm2"
     RELATION_EMB_FGA = "relation_emb_fga"  # fast gradient attack
+    RELATION_EMB_PGD = "relation_emb_pgd"
 
 
 SEED = 233
@@ -24,15 +25,19 @@ SEED = 233
 
 class AdversarialEngine(core.Engine):
     """Engine specifically supports attack during evaluation."""
-    def evaluate(self, split, attack_method=None, attack_scale=None, log=True):
+    def evaluate(
+            self, split, *, attack_method=None, attack_scale=None, pdg_steps=None, pgd_eps=None, log=True, **kwargs
+    ):
         """
         Evaluate the model.
 
         Parameters:
             split (str): split to evaluate. Can be ``train``, ``valid`` or ``test``.
-            log (bool, optional): log metrics or not
             attack_method: adversarial attack method
             attack_scale: scale of the perturbation in attack applied
+            pdg_steps: number of steps to conduct projection in PGD
+            pgd_eps: restrict perturbation value for projected gradient descent
+            log (bool, optional): log metrics or not
 
         Returns:
             dict: metrics
@@ -52,19 +57,7 @@ class AdversarialEngine(core.Engine):
             if self.device.type == "cuda":
                 batch = utils.cuda(batch, device=self.device)
 
-            if attack_method in (
-                    AttackMethod.RELATION_EMB_FGA.value,
-                    AttackMethod.RELATION_EMB_NORM2.value,
-            ):
-                model.zero_grad()
-                all_loss = torch.tensor(0, dtype=torch.float32, device=self.device)
-                metric = {}
-                pred, target = model.predict_and_target(batch, all_loss, metric)
-                all_loss, metric = model.calculate_loss(pred, target, metric, all_loss)
-                all_loss.backward()
-
-            perturb = self.calculate_attack_perturbation(model.model.model.query, attack_method, attack_scale)
-            model.model.model.query_override = model.model.model.query.weight.detach().clone() + perturb
+            self.calculate_and_apply_attack_perturbation(attack_method, attack_scale, pdg_steps, pgd_eps, batch)
 
             with torch.no_grad():
                 pred, target = model.predict_and_target(batch)
@@ -76,6 +69,7 @@ class AdversarialEngine(core.Engine):
                     AttackMethod.RELATION_EMB_RANDOM.value,
                     AttackMethod.RELATION_EMB_FGA.value,
                     AttackMethod.RELATION_EMB_NORM2.value,
+                    AttackMethod.RELATION_EMB_PGD.value,
             ):
                 del model.model.model.query_override
 
@@ -90,63 +84,70 @@ class AdversarialEngine(core.Engine):
 
         return metric
 
-    @staticmethod
-    def calculate_attack_perturbation(target, attack_method, attack_scale):
+    def calculate_and_apply_attack_perturbation(self, attack_method, attack_scale, pdg_steps, pgd_eps, batch):
+        if attack_method in (
+                AttackMethod.RELATION_EMB_RANDOM.value,
+                AttackMethod.RELATION_EMB_FGA.value,
+                AttackMethod.RELATION_EMB_NORM2.value,
+        ):
+            self._calculate_and_apply_attack_perturbation_non_pgd(attack_method, attack_scale, batch)
+
+        elif attack_method == AttackMethod.RELATION_EMB_PGD.value:
+            self._calculate_and_apply_attack_perturbation_pgd(attack_method, attack_scale, pdg_steps, pgd_eps, batch)
+
+    def _calculate_and_apply_attack_perturbation_non_pgd(self, attack_method, attack_scale, batch):
+        if attack_method != AttackMethod.RELATION_EMB_RANDOM.value:
+            # use self.model.model.model.query in forward, get the gradient
+            self.model.zero_grad()
+            all_loss = torch.tensor(0, dtype=torch.float32, device=self.device)
+            metric = {}
+            pred, target = self.model.predict_and_target(batch, all_loss, metric)
+            all_loss, metric = self.model.calculate_loss(pred, target, metric, all_loss)
+            all_loss.backward()
+
         if attack_method == AttackMethod.RELATION_EMB_RANDOM.value:
             torch.manual_seed(SEED)
-            return attack_scale * torch.randn_like(target.weight)
+            perturb = attack_scale * torch.randn_like(self.model.model.model.query.weight)
 
         elif attack_method == AttackMethod.RELATION_EMB_FGA.value:
-            grad = target.weight.grad
-            return attack_scale * grad.sign()
+            grad = self.model.model.model.query.weight.grad
+            perturb = attack_scale * grad.sign()
 
         elif attack_method == AttackMethod.RELATION_EMB_NORM2.value:
-            grad = target.weight.grad
-            return attack_scale * grad / (grad.norm(p=2, dim=1, keepdim=True) + 1e-8)
+            grad = self.model.model.model.query.weight.grad
+            perturb = attack_scale * grad / (grad.norm(p=2, dim=1, keepdim=True) + 1e-8)
 
         else:
-            raise ValueError(f"Unknown Attack Method {attack_method}")
+            raise ValueError(
+                f"invalid Attack Method under _calculate_and_apply_attack_perturbation_non_pgd: {attack_method}"
+            )
 
+        self.model.model.model.query_override = self.model.model.model.query.weight.detach().clone() + perturb
 
-# class RelationEmbAttacker:
-#     def __init__(self, model):
-#         self.model = model
-#         self.query_embedding = model.query  # nn.Embedding
-#         self.seed = 233
-#
-#     def random_attack(self, scale):
-#         """Random perturbation to query embedding."""
-#         torch.manual_seed(self.seed)
-#         with torch.no_grad():
-#             noise = scale * torch.randn_like(self.query_embedding.weight)
-#             self.query_embedding.weight.add_(noise)
-#
-#     def fgsm_attack(self, loss_fn, inputs, targets, scale):
-#         """FGSM attack on query embedding."""
-#         torch.manual_seed(self.seed)
-#         self.model.zero_grad()
-#         output = self.model(*inputs)
-#         loss = loss_fn(output, targets)
-#         loss.backward()
-#         with torch.no_grad():
-#             grad = self.query_embedding.weight.grad
-#             perturb = scale * grad.sign()
-#             self.query_embedding.weight.add_(perturb)
+    def _calculate_and_apply_attack_perturbation_pgd(self, attack_method, attack_scale, pdg_steps, pgd_eps, batch):
+        original = self.model.model.model.query.weight.detach()
 
-    # def pgd_attack(self, loss_fn, inputs, targets, alpha=1e-3, steps=3):
-    #     """PGD attack on query embedding."""
-    #     original = self.query_embedding.weight.detach().clone()
-    #     perturb = torch.zeros_like(original)
-    #
-    #     for _ in range(steps):
-    #         self.query_embedding.weight.data = (original + perturb).detach().clone().requires_grad_()
-    #         self.model.zero_grad()
-    #         output = self.model(*inputs)
-    #         loss = loss_fn(output, targets)
-    #         loss.backward()
-    #         grad = self.query_embedding.weight.grad
-    #         perturb = perturb + alpha * grad.sign()
-    #         perturb = torch.clamp(perturb, -self.epsilon, self.epsilon)
-    #
-    #     with torch.no_grad():
-    #         self.query_embedding.weight.data = original + perturb
+        # random values initial
+        perturb = attack_scale * torch.randn_like(original, device=self.device)
+        perturb = torch.clamp(perturb, -pgd_eps, pgd_eps)
+
+        for _ in range(pdg_steps):
+            # update and use override in forward in each step
+            query_override = (original + perturb).requires_grad_()
+            self.model.model.model.query_override = query_override
+
+            self.model.zero_grad()
+            all_loss = torch.tensor(0, dtype=torch.float32, device=self.device)
+            metric = {}
+            pred, target = self.model.predict_and_target(batch, all_loss, metric)
+            all_loss, metric = self.model.calculate_loss(pred, target, metric, all_loss)
+            all_loss.backward()
+
+            grad = self.model.model.model.query_override.grad
+
+            # update the perturb given the gradient
+            perturb = perturb + attack_scale * grad.sign()
+            perturb = torch.clamp(perturb, -pgd_eps, pgd_eps)
+
+        self.model.model.model.query_override = (original + perturb).detach()
+
