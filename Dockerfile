@@ -26,7 +26,7 @@ RUN pip install torch==1.10.2 -f https://download.pytorch.org/whl/cu113/torch_st
 #     pip install torchdrug==0.2.1 && \
     pip install easydict pyyaml ogb
 
-RUN apt update && apt install vim
+RUN apt update && apt install -y vim
 
 RUN mkdir -p /data
 
