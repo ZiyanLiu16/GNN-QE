@@ -48,4 +48,3 @@ evaluate:
   pgd_eps: 3
   pgd_steps: 3
   edge_ratio: 0.05
-  pdg_s_restrict_ratio: 0.5
