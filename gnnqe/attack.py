@@ -68,7 +68,7 @@ class AdversarialEngine(core.Engine):
             if self.device.type == "cuda":
                 batch = utils.cuda(batch, device=self.device)
 
-            elif attack_method in (
+            if attack_method in (
                     AttackMethod.RELATION_EMB_RANDOM.value,
                     AttackMethod.RELATION_EMB_FGA.value,
                     AttackMethod.RELATION_EMB_NORM2.value,
