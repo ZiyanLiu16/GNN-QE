@@ -24,7 +24,7 @@ task:
   adversarial_temperature: 0.2
   noise_level: .5
   adversarial_strength: 0.5
-  perturb_target: linear # see PerturbTarget,
+  perturb_target: '' # linear # see PerturbTarget,
   mutual_info_weighted_perturb: False
 
 optimizer:
@@ -33,7 +33,7 @@ optimizer:
 
 engine:
   gpus: {{ gpus }}
-  batch_size: 48
+  batch_size: 2
 
 train:
   num_epoch: 10
@@ -43,7 +43,9 @@ metric: mrr
 
 evaluate:
   checkpoint: ~/projects/graph_neural_network_query_executor/models/model_original/model_epoch_10.pth
-  attack_method: relation_emb_pgd
-  attack_scale: 0.4
+  attack_method: soft_edge_pgd
+  attack_scale: 0.02 # 0.4
   pgd_eps: 3
-  pdg_steps: 3
+  pgd_steps: 3
+  edge_ratio: 0.05
+  pdg_s_restrict_ratio: 0.5

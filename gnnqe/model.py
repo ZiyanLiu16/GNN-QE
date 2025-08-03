@@ -50,9 +50,16 @@ class QueryExecutor(nn.Module, core.Configurable):
 
         is_sampled = torch.rand(len(edge_index), device=self.device) <= self.dropout_ratio
         edge_index = edge_index[is_sampled]
-
         edge_mask = ~functional.as_mask(edge_index, graph.num_edge)
-        return graph.edge_mask(edge_mask)
+
+        # when use edge_soft_mask, apply mask as zero weight
+        if hasattr(self.model.model.layers[0], "edge_soft_drop"):
+            edge_mask = edge_mask.float()
+            for layer in self.model.model.layers:
+                layer.edge_mask = edge_mask
+            return graph
+        else:
+            return graph.edge_mask(edge_mask)
 
     def execute(self, graph, query, all_loss=None, metric=None):
         """Execute queries on the graph."""
