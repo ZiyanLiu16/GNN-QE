@@ -82,8 +82,6 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
 
         edge_weight = graph.edge_weight
         if hasattr(self, "edge_soft_drop"):
-            print(f"edge_weight.sum(): {edge_weight.sum()}")
-            print(f"(1 - self.edge_soft_drop).sum(): {(1 - self.edge_soft_drop).sum()}")
             edge_weight = edge_weight * (1 - self.edge_soft_drop) * self.edge_mask
         # ones are self weight. no need to perturb.
         edge_weight = torch.cat([edge_weight, torch.ones(graph.num_node, device=graph.device)])

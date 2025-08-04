@@ -117,13 +117,12 @@ class AdversarialEngine(core.Engine):
             self._calculate_and_apply_attack_perturbation_non_pgd(attack_method, attack_scale, batch)
 
         elif attack_method == AttackMethod.RELATION_EMB_PGD.value:
-            self._calculate_and_apply_attack_perturbation_pgd(attack_method, attack_scale, pgd_steps, pgd_eps, batch)
+            _calculate_and_apply_attack_perturbation_pgd(self.model, attack_scale, pgd_steps, pgd_eps, batch)
 
         elif attack_method == AttackMethod.SOFT_EDGE_PGD.value:
-            self._calculate_and_apply_attack_perturbation_pgd_soft_edge(attack_scale, pgd_steps, edge_ratio, batch)
-
-        elif attack_method == AttackMethod.SOFT_EDGE_PGD.value:
-            self._calculate_and_soft_edge_pgd_perturbation()
+            _calculate_and_apply_attack_perturbation_pgd_soft_edge(
+                self.model, attack_scale, pgd_steps, edge_ratio, batch
+            )
 
     def _calculate_and_apply_attack_perturbation_non_pgd(self, attack_method, attack_scale, batch):
         if attack_method != AttackMethod.RELATION_EMB_RANDOM.value:
@@ -153,93 +152,89 @@ class AdversarialEngine(core.Engine):
 
         self.model.model.model.query_override = self.model.model.model.query.weight.detach().clone() + perturb
 
-    def _calculate_and_apply_attack_perturbation_pgd(self, attack_method, attack_scale, pgd_steps, pgd_eps, batch):
-        original = self.model.model.model.query.weight.detach()
 
-        # random values initial
-        perturb = attack_scale * torch.randn_like(original, device=self.device)
+def _calculate_and_apply_attack_perturbation_pgd(model, attack_scale, pgd_steps, pgd_eps, batch):
+    original = model.model.model.query.weight.detach()
+
+    # random values initial
+    perturb = attack_scale * torch.randn_like(original, device=model.device)
+    perturb = torch.clamp(perturb, -pgd_eps, pgd_eps)
+
+    for _ in range(pgd_steps):
+        # update and use override in forward in each step
+        query_override = (original + perturb).requires_grad_()
+        model.model.model.query_override = query_override
+
+        model.zero_grad()
+        all_loss = torch.tensor(0, dtype=torch.float32, device=model.device)
+        metric = {}
+        pred, target = model.predict_and_target(batch, all_loss, metric)
+        all_loss, metric = model.calculate_loss(pred, target, metric, all_loss)
+        all_loss.backward()
+
+        grad = model.model.model.query_override.grad
+
+        # update the perturb given the gradient
+        perturb = perturb + attack_scale * grad.sign()
+        # torch.clamp creates a new tensor
         perturb = torch.clamp(perturb, -pgd_eps, pgd_eps)
 
-        for _ in range(pgd_steps):
-            # update and use override in forward in each step
-            query_override = (original + perturb).requires_grad_()
-            self.model.model.model.query_override = query_override
+    model.model.model.query_override = (original + perturb).detach()
 
-            self.model.zero_grad()
-            all_loss = torch.tensor(0, dtype=torch.float32, device=self.device)
-            metric = {}
-            pred, target = self.model.predict_and_target(batch, all_loss, metric)
-            all_loss, metric = self.model.calculate_loss(pred, target, metric, all_loss)
-            all_loss.backward()
 
-            grad = self.model.model.model.query_override.grad
+def _calculate_and_apply_attack_perturbation_pgd_soft_edge(model, attack_scale, pgd_steps, perturb_ratio, batch):
+    num_edge = int(model.fact_graph.num_edge)
+    edge_soft_drop_raw = torch.rand(1, num_edge, device=model.device, requires_grad=True)
+    eps = num_edge * perturb_ratio
 
-            # update the perturb given the gradient
-            perturb = perturb + attack_scale * grad.sign()
-            # torch.clamp creates a new tensor
-            perturb = torch.clamp(perturb, -pgd_eps, pgd_eps)
+    for _ in range(pgd_steps):
+        edge_soft_drop_raw = (_restrict_soft_drop(edge_soft_drop_raw, eps)).squeeze(0)
+        edge_soft_drop = edge_soft_drop_raw.detach().requires_grad_()
 
-        self.model.model.model.query_override = (original + perturb).detach()
+        # can't assign to graph, will be dropped during `traversal_dropout`.
+        for layer in model.model.model.model.layers:
+            layer.edge_soft_drop = edge_soft_drop
 
-    def _calculate_and_apply_attack_perturbation_pgd_soft_edge(self, attack_scale, pgd_steps, perturb_ratio, batch):
-        num_edge = int(self.model.fact_graph.num_edge)
-        edge_soft_drop_raw = torch.rand(1, num_edge, device=self.model.device, requires_grad=True)
-        eps = num_edge * perturb_ratio
+        model.zero_grad()
+        all_loss = torch.tensor(0.0, device=model.device)
+        metric = {}
 
-        for _ in range(pgd_steps):
-            print("- " * 30)
-            edge_soft_drop_raw = (self._restrict_soft_drop(edge_soft_drop_raw, eps)).squeeze(0)
-            edge_soft_drop = edge_soft_drop_raw.detach().requires_grad_()
+        pred, target = model.predict_and_target(batch, all_loss, metric)
+        all_loss, metric = model.calculate_loss(pred, target, metric, all_loss)
+        all_loss.backward()
 
-            # can't assign to graph, will be dropped during `traversal_dropout`.
-            for layer in self.model.model.model.model.layers:
-                layer.edge_soft_drop = edge_soft_drop
-
-            self.model.zero_grad()
-            all_loss = torch.tensor(0.0, device=self.model.device)
-            metric = {}
-
-            pred, target = self.model.predict_and_target(batch, all_loss, metric)
-            all_loss, metric = self.model.calculate_loss(pred, target, metric, all_loss)
-            all_loss.backward()
-
-            grad = edge_soft_drop.grad
-            print(f"edge_soft_drop: {edge_soft_drop[:6]}")
-            print(f"grad: {grad[:6]}")
-            with torch.no_grad():
-                edge_soft_drop_raw = (edge_soft_drop + attack_scale * grad.sign()).detach().requires_grad_()
-
+        grad = edge_soft_drop.grad
         with torch.no_grad():
-            edge_soft_drop = self._restrict_soft_drop(edge_soft_drop_raw, eps).squeeze(0)
-            edge_soft_drop = torch.bernoulli(edge_soft_drop).detach()
-            print(f"(1 - edge_soft_drop).sum(): {(1 - edge_soft_drop).sum()}")
-            for layer in self.model.model.model.model.layers:
-                layer.edge_soft_drop = edge_soft_drop
+            edge_soft_drop_raw = (edge_soft_drop + attack_scale * grad.sign()).detach().requires_grad_()
 
-        print("- " * 30 + "\n" + "- " * 30 + "- " * 30)
-        return
+    with torch.no_grad():
+        edge_soft_drop = _restrict_soft_drop(edge_soft_drop_raw, eps).squeeze(0)
+        edge_soft_drop = torch.bernoulli(edge_soft_drop).detach()
+        for layer in model.model.model.model.layers:
+            layer.edge_soft_drop = edge_soft_drop
+    return
 
-    @staticmethod
-    def _restrict_soft_drop(a, eps, xi=1e-5, ub=1):
-        pa = torch.clamp(a, 0, ub)
-        if pa.sum() <= eps:
-            return pa
-        else:
-            mu_l = (a - 1).min()
-            mu_u = a.max()
 
-            while torch.abs(mu_u - mu_l) > xi:
-                mu_a = (mu_u + mu_l) / 2
-                gu = (torch.clamp(a - mu_a, 0, ub)).sum() - eps
-                gu_l = (torch.clamp(a - mu_l, 0, ub)).sum() - eps
-                if gu == 0:
-                    break
-                if torch.sign(gu) == torch.sign(gu_l):
-                    mu_l = mu_a
-                else:
-                    mu_u = mu_a
+def _restrict_soft_drop(a, eps, xi=1e-5, ub=1):
+    pa = torch.clamp(a, 0, ub)
+    if pa.sum() <= eps:
+        return pa
+    else:
+        mu_l = (a - 1).min()
+        mu_u = a.max()
 
-            return torch.clamp(a - mu_a, 0, ub)
+        while torch.abs(mu_u - mu_l) > xi:
+            mu_a = (mu_u + mu_l) / 2
+            gu = (torch.clamp(a - mu_a, 0, ub)).sum() - eps
+            gu_l = (torch.clamp(a - mu_l, 0, ub)).sum() - eps
+            if gu == 0:
+                break
+            if torch.sign(gu) == torch.sign(gu_l):
+                mu_l = mu_a
+            else:
+                mu_u = mu_a
+
+        return torch.clamp(a - mu_a, 0, ub)
 
 
 # class SoftEdgePerturb:

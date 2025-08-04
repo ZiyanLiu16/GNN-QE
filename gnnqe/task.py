@@ -4,20 +4,24 @@ from typing import Optional
 import torch
 from torch.nn import functional as F
 from torch.utils import data as torch_data
-
 from torch_scatter import scatter_add, scatter_mean
-
 from torchdrug import core, tasks, metrics
 from torchdrug.layers import functional
 from torchdrug.core import Registry as R
 
+from gnnqe.attack import (
+    _calculate_and_apply_attack_perturbation_pgd,
+    _calculate_and_apply_attack_perturbation_pgd_soft_edge,
+)
+
 
 class PerturbTarget(Enum):
-    EDGE_EMB = "edge_emb"
     LINEAR = "linear"
     RELATION_EMB = "relation_emb"
     RELATION_LINEAR = "relation_linear"
     RELATION_LINEAR_ALL = "relation_linear_all"
+    RELATION_EMB_PGD = "relation_emb_pgd"
+    SOFT_EDGE_PGD = "soft_edge_pgd"
 
 
 @R.register("task.LogicalQuery")
@@ -51,6 +55,9 @@ class LogicalQuery(tasks.Task, core.Configurable):
             adversarial_temperature=0,
             perturb_target: Optional[str] = None,
             sample_weight=False,
+            pgd_steps=None,
+            pgd_eps=None,
+            edge_ratio=None,
     ):
         super(LogicalQuery, self).__init__()
         self.model = model
@@ -62,6 +69,9 @@ class LogicalQuery(tasks.Task, core.Configurable):
         self.adversarial_strength = adversarial_strength
         self.perturb_target = perturb_target
         self.mutual_info_weighted_perturb = mutual_info_weighted_perturb
+        self.pgd_steps = pgd_steps
+        self.pgd_eps=pgd_eps
+        self.edge_ratio = edge_ratio
 
     def preprocess(self, train_set, valid_set, test_set):
         if isinstance(train_set, torch_data.Subset):
@@ -96,19 +106,23 @@ class LogicalQuery(tasks.Task, core.Configurable):
 
         if self.perturb_target:
             all_loss.backward(retain_graph=True)
+
             # TODO: consolidate this to _generate_perturbed_layer and test
             if self.perturb_target == PerturbTarget.RELATION_EMB.value:
                 perturb = self._calculate_perturbation(self.model.model.query)
                 self.model.model.query_override = self.model.model.query.weight.detach().clone() + perturb
+
+            if self.perturb_target in (PerturbTarget.RELATION_EMB_PGD.value, PerturbTarget.SOFT_EDGE_PGD.value):
+                self._calculate_and_apply_perturbation(batch)
+
             if self.perturb_target == PerturbTarget.RELATION_LINEAR.value:
-                perturbs = self._calculate_perturbation(
-                    self.model.model.model.layers[0].relation_linear
-                )
+                perturbs = self._calculate_perturbation(self.model.model.model.layers[0].relation_linear)
                 perturbed_layer = self._generate_perturbed_layer(
                     original_layer=self.model.model.model.layers[0].relation_linear,
                     perturb=perturbs,
                 ).to(self.device)
                 self.model.model.model.perturbed_layer = perturbed_layer
+
             if self.perturb_target == PerturbTarget.RELATION_LINEAR_ALL.value:
                 self.model.model.model.perturbed_layers = []
                 for i in range(len(self.model.model.model.layers)):
@@ -120,6 +134,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
                         perturb=perturbs,
                     ).to(self.device)
                     self.model.model.model.perturbed_layers.append(perturbed_layer)
+
             if self.perturb_target == PerturbTarget.LINEAR.value:
                 perturbs = self._calculate_perturbation(
                     self.model.model.model.layers[0].linear
@@ -135,14 +150,22 @@ class LogicalQuery(tasks.Task, core.Configurable):
             # this is mainly to have correct all_loss_perturbed
             loss_perturbed = torch.tensor(0, dtype=torch.float32, device=self.device)
             pred_perturbed, _ = self.predict_and_target(batch, loss_perturbed, metric)
-            if self.perturb_target == PerturbTarget.RELATION_EMB.value:
+
+            if self.perturb_target in (PerturbTarget.RELATION_EMB.value, PerturbTarget.RELATION_EMB_PGD.value):
                 del self.model.model.query_override
+
             elif self.perturb_target == PerturbTarget.RELATION_LINEAR.value:
                 del self.model.model.model.perturbed_layer
+
             elif self.perturb_target == PerturbTarget.RELATION_LINEAR_ALL.value:
                 del self.model.model.model.perturbed_layers
+
             elif self.perturb_target == PerturbTarget.LINEAR.value:
                 del self.model.model.model.perturbed_linear
+
+            elif self.perturb_target == PerturbTarget.SOFT_EDGE_PGD.value:
+                for layer in self.model.model.model.layers:
+                    del layer.edge_soft_drop
 
             # TODO (ziyan): determine metrics for training. Currently, only metrics from valid and test is logged.
             all_loss_perturbed, metric = self.calculate_loss(pred_perturbed, target, metric, loss_perturbed)
@@ -157,6 +180,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
         if self.perturb_target == PerturbTarget.RELATION_EMB.value:
             grad = target.weight.grad
             return grad / (grad.norm(p=2, dim=1, keepdim=True) + 1e-8)
+
         elif isinstance(target, torch.nn.modules.linear.Linear):
             weight_grad = target.weight.grad
             bias_grad = target.bias.grad
@@ -164,17 +188,29 @@ class LogicalQuery(tasks.Task, core.Configurable):
                 self.noise_level * weight_grad / (weight_grad.norm(p=2, dim=1, keepdim=True) + 1e-8),
                 self.noise_level * bias_grad / (bias_grad.norm(p=2, keepdim=True) + 1e-8),
             )
-        elif self.perturb_target == PerturbTarget.EDGE_EMB.value:
-            # TODO: apply weights to edge embedding.
-            if self.mutual_info_weighted_perturb:
-                mi = calculate_mutual_information_matrix(
-                    edge_index=self.graph._edge_list[:, :2].t(),
-                    edge_weight=self.graph._edge_weight,
-                    num_nodes=int(self.graph.num_node),
-                )
-                weights = 1 - mi / mi.max()
+
         else:
             raise ValueError(f"Unidentified types of perturbation target: {target}")
+
+    # TODO (ziyan): consolidate with usage of _calculate_perturbation
+    def _calculate_and_apply_perturbation(self, batch):
+        if self.perturb_target == PerturbTarget.RELATION_EMB_PGD.value:
+            _calculate_and_apply_attack_perturbation_pgd(
+                model=self,
+                attack_scale=self.noise_level,
+                pgd_steps=self.pgd_steps,
+                pgd_eps=self.pgd_eps,
+                batch=batch,
+            )
+
+        elif self.perturb_target == PerturbTarget.SOFT_EDGE_PGD.value:
+            _calculate_and_apply_attack_perturbation_pgd_soft_edge(
+                model=self,
+                attack_scale=self.noise_level,
+                pgd_steps=self.pgd_steps,
+                perturb_ratio=self.edge_ratio,
+                batch=batch,
+            )
 
     @staticmethod
     def _generate_perturbed_layer(original_layer, perturb):

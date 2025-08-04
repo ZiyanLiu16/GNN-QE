@@ -22,10 +22,13 @@ task:
   criterion: bce
   sample_weight: no
   adversarial_temperature: 0.2
-  noise_level: .5
   adversarial_strength: 0.5
-  perturb_target: '' # linear # see PerturbTarget,
+  perturb_target: soft_edge_pgd # linear # see PerturbTarget,
   mutual_info_weighted_perturb: False
+  noise_level: 0.4 #.5
+  pgd_eps: 3
+  pgd_steps: 3
+  edge_ratio: 0.05
 
 optimizer:
   class: Adam
@@ -41,10 +44,10 @@ train:
 
 metric: mrr
 
-evaluate:
-  checkpoint: ~/projects/graph_neural_network_query_executor/models/model_original/model_epoch_10.pth
-  attack_method: soft_edge_pgd
-  attack_scale: 0.02 # 0.4
-  pgd_eps: 3
-  pgd_steps: 3
-  edge_ratio: 0.05
+evaluate: ""
+#  checkpoint: ~/projects/graph_neural_network_query_executor/models/model_original/model_epoch_10.pth
+#  attack_method: relation_emb_pgd #soft_edge_pgd
+#  attack_scale: 0.02 # 0.4
+#  pgd_eps: 3
+#  pgd_steps: 3
+#  edge_ratio: 0.05
