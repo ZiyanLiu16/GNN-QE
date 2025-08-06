@@ -199,10 +199,8 @@ def _calculate_and_apply_attack_perturbation_pgd_soft_edge(model, attack_scale, 
         all_loss = torch.tensor(0.0, dtype=torch.float32, device=model.device)
         metric = {}
 
-        from torch.cuda.amp import autocast
-        with autocast():
-            pred, target = model.predict_and_target(batch, all_loss, metric)
-            all_loss, metric = model.calculate_loss(pred, target, metric, all_loss)
+        pred, target = model.predict_and_target(batch, all_loss, metric)
+        all_loss, metric = model.calculate_loss(pred, target, metric, all_loss)
         all_loss.backward()
 
         grad = edge_soft_drop.grad

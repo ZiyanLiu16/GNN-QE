@@ -4,6 +4,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from torch_scatter import scatter_add, scatter_mean, scatter_max, scatter_min
+
 from torchdrug import layers, utils
 from torchdrug.layers import functional
 
