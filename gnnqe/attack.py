@@ -184,7 +184,7 @@ def _calculate_and_apply_attack_perturbation_pgd(model, attack_scale, pgd_steps,
 
 def _calculate_and_apply_attack_perturbation_pgd_soft_edge(model, attack_scale, pgd_steps, perturb_ratio, batch):
     num_edge = int(model.fact_graph.num_edge)
-    edge_soft_drop_raw = torch.rand(1, num_edge, device=model.device, requires_grad=True)
+    edge_soft_drop_raw = torch.rand(1, num_edge, device=model.device)
     eps = num_edge * perturb_ratio
 
     for _ in range(pgd_steps):
@@ -196,7 +196,7 @@ def _calculate_and_apply_attack_perturbation_pgd_soft_edge(model, attack_scale, 
             layer.edge_soft_drop = edge_soft_drop
 
         model.zero_grad()
-        all_loss = torch.tensor(0.0, device=model.device)
+        all_loss = torch.tensor(0.0, dtype=torch.float32, device=model.device)
         metric = {}
 
         pred, target = model.predict_and_target(batch, all_loss, metric)
@@ -204,8 +204,7 @@ def _calculate_and_apply_attack_perturbation_pgd_soft_edge(model, attack_scale, 
         all_loss.backward()
 
         grad = edge_soft_drop.grad
-        with torch.no_grad():
-            edge_soft_drop_raw = (edge_soft_drop + attack_scale * grad.sign()).detach().requires_grad_()
+        edge_soft_drop_raw = (edge_soft_drop + attack_scale * grad.sign()).detach()
 
     with torch.no_grad():
         edge_soft_drop = _restrict_soft_drop(edge_soft_drop_raw, eps).squeeze(0)
