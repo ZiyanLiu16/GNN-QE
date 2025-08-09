@@ -44,7 +44,7 @@ train:
 
 metric: mrr
 
-evaluate:
+evaluate: ""
 #  checkpoint: ~/projects/graph_neural_network_query_executor/models/model_original/model_epoch_10.pth
 #  attack_method: relation_emb_pgd #soft_edge_pgd
 #  attack_scale: 0.4
