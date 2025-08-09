@@ -23,10 +23,10 @@ task:
   sample_weight: no
   adversarial_temperature: 0.2
   adversarial_strength: 0.5
-  perturb_target: "" # linear # see PerturbTarget,
+  perturb_target: relation_emb_pgd # linear # see PerturbTarget,
   mutual_info_weighted_perturb: False
-  noise_level: .1
-  pgd_eps: 3
+  noise_level: .2
+  pgd_eps: 1
   pgd_steps: 3
   edge_ratio: 0.05
 
