@@ -83,6 +83,7 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
         edge_weight = graph.edge_weight
         if hasattr(self, "edge_soft_drop"):
             edge_weight = edge_weight * (1 - self.edge_soft_drop) * self.edge_mask
+
         # ones are self weight. no need to perturb.
         edge_weight = torch.cat([edge_weight, torch.ones(graph.num_node, device=graph.device)])
         edge_weight = edge_weight.unsqueeze(-1).unsqueeze(-1)
@@ -96,7 +97,7 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
             update = scatter_max(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)[0]
         elif self.aggregate_func == "pna":
             mean = scatter_mean(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)
-            sq_mean = scatter_mean(message ** 2 * edge_weight, node_out, dim=0, dim_size=graph.num_node)
+            sq_mean = scatter_mean((message * edge_weight) ** 2 , node_out, dim=0, dim_size=graph.num_node)
             max = scatter_max(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)[0]
             min = scatter_min(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)[0]
             std = (sq_mean - mean ** 2).clamp(min=self.eps).sqrt()
@@ -112,8 +113,7 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
         return update
 
     def message_and_aggregate(self, graph, input):
-        if hasattr(self, "edge_soft_drop") or graph.requires_grad or self.message_func == "rotate":
-            # this uses MessagePassingBase.message_and_aggregate
+        if graph.requires_grad or self.message_func == "rotate":
             return super(GeneralizedRelationalConv, self).message_and_aggregate(graph, input)
 
         assert graph.num_relation == self.num_relation
@@ -129,7 +129,15 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
         else:
             relation_input = self.relation.weight.repeat(1, batch_size)
 
-        adjacency = graph.adjacency.transpose(0, 1)
+        adjacency = graph.adjacency
+        if hasattr(self, "edge_soft_drop"):
+            indices = adjacency._indices()
+            values  = adjacency._values()
+            drop = self.edge_soft_drop.to(values.device, values.dtype)
+            values_tilde = values * (1.0 - drop)
+            adjacency = torch.sparse_coo_tensor(indices, values_tilde, adjacency.size(), device=adjacency.device)
+
+        adjacency = adjacency.transpose(0, 1)
 
         if self.message_func in self.message2mul:
             mul = self.message2mul[self.message_func]
