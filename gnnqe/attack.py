@@ -162,7 +162,7 @@ def _calculate_and_apply_attack_perturbation_pgd(model, attack_scale, pgd_steps,
 
     for _ in range(pgd_steps):
         # update and use override in forward in each step
-        query_override = (original + perturb).requires_grad_()
+        query_override = (original + perturb).detach().requires_grad_()
         model.model.model.query_override = query_override
 
         model.zero_grad()
@@ -170,12 +170,14 @@ def _calculate_and_apply_attack_perturbation_pgd(model, attack_scale, pgd_steps,
         metric = {}
         pred, target = model.predict_and_target(batch, all_loss, metric)
         all_loss, metric = model.calculate_loss(pred, target, metric, all_loss)
-        all_loss.backward()
-
-        grad = model.model.model.query_override.grad
+        # all_loss.backward()
+        # grad = model.model.model.query_override.grad
+        
+        grad = torch.autograd.grad(all_loss, query_override, retain_graph=False, create_graph=False)[0]
 
         # update the perturb given the gradient
         perturb = perturb + attack_scale * grad.sign()
+        
         # torch.clamp creates a new tensor
         perturb = torch.clamp(perturb, -pgd_eps, pgd_eps)
 

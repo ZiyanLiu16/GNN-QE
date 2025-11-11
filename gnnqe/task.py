@@ -105,10 +105,10 @@ class LogicalQuery(tasks.Task, core.Configurable):
         all_loss, metric = self.calculate_loss(pred, target, metric, all_loss)
 
         if self.perturb_target:
-            # TODO (ziyan): extract gradient without backward to be cleaner.
-            # obtain the gradient for gradient based perturbation; gradient reset to zero 
-            # when perturbation value is being generated.
-            all_loss.backward(retain_graph=True)
+            # # TODO (ziyan): extract gradient without backward to be cleaner.
+            # # obtain the gradient for gradient based perturbation; gradient reset to zero 
+            # # when perturbation value is being generated.
+            # all_loss.backward(retain_graph=True)
 
             # TODO: consolidate this to _generate_perturbed_layer and test
             if self.perturb_target == PerturbTarget.RELATION_EMB.value:
@@ -116,7 +116,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
                 self.model.model.query_override = self.model.model.query.weight.detach().clone() + perturb
 
             if self.perturb_target in (
-                PerturbTarget.RELATION_EMB_PGD.value, 
+                PerturbTarget.RELATION_EMB_PGD.value,
                 PerturbTarget.SOFT_EDGE_PGD.value
             ):
                 self._calculate_and_apply_perturbation(batch)
