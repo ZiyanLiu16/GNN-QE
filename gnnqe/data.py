@@ -207,6 +207,11 @@ class Stack(object):
     def push(self, mask, value):
         if (self.SP[mask] >= self.stack_size).any():
             raise ValueError("Stack overflow")
+        # self.stack is [batch_size, stack_size, num_nodes]
+        # this assignment is equivalent to [batch_size, stack_size, :]
+        # mask is a boolean array of size [batch_size], it's a mask of `active queries`
+        # self.SP[mask] is of size [batch_size], the values are integer representing the number of operations for each query
+        # so assign to index of self.SP[mask], always update the latest state of the query
         self.stack[mask, self.SP[mask]] = value
         self.SP[mask] += 1
 

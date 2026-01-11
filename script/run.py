@@ -25,6 +25,7 @@ def train_and_validate(cfg, solver):
         kwargs["num_epoch"] = min(step, cfg.train.num_epoch - i)
         solver.train(**kwargs)
         solver.save("model_epoch_%d.pth" % solver.epoch)
+        # here the model from the epoch with the best valid mrr is returned (for later evaluation)
         metric = solver.evaluate("valid")
         result = metric[cfg.metric]
         if result > best_result:
@@ -37,8 +38,12 @@ def train_and_validate(cfg, solver):
 
 def test(cfg, solver):
     solver.model.metric = ("mrr", "hits@1", "mape", "spearmanr")
-    solver.evaluate("valid")
-    solver.evaluate("test")
+    if cfg.evaluate and cfg.evaluate.attack_method:
+        solver.evaluate("valid", **dict(cfg.evaluate))
+        solver.evaluate("test", **dict(cfg.evaluate))
+    else:
+        solver.evaluate("valid")
+        solver.evaluate("test")
 
 
 if __name__ == "__main__":
@@ -56,5 +61,7 @@ if __name__ == "__main__":
     dataset = core.Configurable.load_config_dict(cfg.dataset)
     solver = util.build_solver(cfg, dataset)
 
-    train_and_validate(cfg, solver)
+    if not cfg.evaluate:
+        train_and_validate(cfg, solver)
+
     test(cfg, solver)

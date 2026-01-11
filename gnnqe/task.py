@@ -1,12 +1,27 @@
+from enum import Enum
+from typing import Optional
+
 import torch
 from torch.nn import functional as F
 from torch.utils import data as torch_data
-
 from torch_scatter import scatter_add, scatter_mean
-
 from torchdrug import core, tasks, metrics
 from torchdrug.layers import functional
 from torchdrug.core import Registry as R
+
+from gnnqe.attack import (
+    _calculate_and_apply_attack_perturbation_pgd,
+    _calculate_and_apply_attack_perturbation_pgd_soft_edge,
+)
+
+
+class PerturbTarget(Enum):
+    LINEAR = "linear"
+    RELATION_EMB = "relation_emb"
+    RELATION_LINEAR = "relation_linear"
+    RELATION_LINEAR_ALL = "relation_linear_all"
+    RELATION_EMB_PGD = "relation_emb_pgd"
+    SOFT_EDGE_PGD = "soft_edge_pgd"
 
 
 @R.register("task.LogicalQuery")
@@ -22,17 +37,41 @@ class LogicalQuery(tasks.Task, core.Configurable):
         adversarial_temperature (float, optional): temperature for self-adversarial negative sampling.
             Set ``0`` to disable self-adversarial negative sampling.
         sample_weight (bool, optional): whether to weight each query by its number of answers
+        noise_level: factor to scale input perturbation
+        adversarial_strength: scalar of loss from perturbed inputs
+        perturb_target: the parameters to apply perturbation on.
     """
 
     _option_members = ["criterion", "metric", "query_type_weight"]
 
-    def __init__(self, model, criterion="bce", metric=("mrr",), adversarial_temperature=0, sample_weight=False):
+    def __init__(
+            self,
+            model,
+            noise_level: float,
+            adversarial_strength: float,
+            mutual_info_weighted_perturb: bool,
+            criterion="bce",
+            metric=("mrr",),
+            adversarial_temperature=0,
+            perturb_target: Optional[str] = None,
+            sample_weight=False,
+            pgd_steps=None,
+            pgd_eps=None,
+            edge_ratio=None,
+    ):
         super(LogicalQuery, self).__init__()
         self.model = model
         self.criterion = criterion
         self.metric = metric
         self.adversarial_temperature = adversarial_temperature
         self.sample_weight = sample_weight
+        self.noise_level = noise_level
+        self.adversarial_strength = adversarial_strength
+        self.perturb_target = perturb_target
+        self.mutual_info_weighted_perturb = mutual_info_weighted_perturb
+        self.pgd_steps = pgd_steps
+        self.pgd_eps=pgd_eps
+        self.edge_ratio = edge_ratio
 
     def preprocess(self, train_set, valid_set, test_set):
         if isinstance(train_set, torch_data.Subset):
@@ -44,6 +83,10 @@ class LogicalQuery(tasks.Task, core.Configurable):
         self.id2type = dataset.id2type
         self.type2id = dataset.type2id
 
+        # TODO (ziyan): graph registered here
+        #   see dataset
+        # self.graph is the full graph without missing edges
+        # self.fact_graph is the training graph
         self.register_buffer("fact_graph", dataset.fact_graph)
         self.register_buffer("graph", dataset.graph)
 
@@ -53,39 +96,142 @@ class LogicalQuery(tasks.Task, core.Configurable):
         all_loss = torch.tensor(0, dtype=torch.float32, device=self.device)
         metric = {}
 
+        # pred: [batch_size, num_entities]
+        # target: [batch_size, num_entities]
+        # this function is also the predict function during inference,
+        # see torchdrug.core.engine.Engine.evaluate
         pred, target = self.predict_and_target(batch, all_loss, metric)
 
-        for criterion, weight in self.criterion.items():
-            if criterion == "bce":
-                loss = F.binary_cross_entropy_with_logits(pred, target, reduction="none")
+        all_loss, metric = self.calculate_loss(pred, target, metric, all_loss)
 
-                is_positive = target > 0.5
-                is_negative = target <= 0.5
-                num_positive = is_positive.sum(dim=-1)
-                num_negative = is_negative.sum(dim=-1)
-                neg_weight = torch.zeros_like(pred)
-                neg_weight[is_positive] = (1 / num_positive.float()).repeat_interleave(num_positive)
-                if self.adversarial_temperature > 0:
-                    with torch.no_grad():
-                        logit = pred[is_negative] / self.adversarial_temperature
-                        neg_weight[is_negative] = functional.variadic_softmax(logit, num_negative)
-                else:
-                    neg_weight[is_negative] = (1 / num_negative.float()).repeat_interleave(num_negative)
-                loss = (loss * neg_weight).sum(dim=-1) / neg_weight.sum(dim=-1)
-            else:
-                raise ValueError("Unknown criterion `%s`" % criterion)
+        if self.perturb_target:
+            # # TODO (ziyan): extract gradient without backward to be cleaner.
+            # # obtain the gradient for gradient based perturbation; gradient reset to zero 
+            # # when perturbation value is being generated.
+            # all_loss.backward(retain_graph=True)
 
-            if self.sample_weight:
-                sample_weight = target.sum(dim=-1).float()
-                loss = (loss * sample_weight).sum() / sample_weight.sum()
-            else:
-                loss = loss.mean()
+            # TODO: consolidate this to _generate_perturbed_layer and test
+            if self.perturb_target == PerturbTarget.RELATION_EMB.value:
+                perturb = self._calculate_perturbation(self.model.model.query)
+                self.model.model.query_override = self.model.model.query.weight.detach().clone() + perturb
 
-            name = tasks._get_criterion_name(criterion)
-            metric[name] = loss
-            all_loss += loss * weight
+            if self.perturb_target in (
+                PerturbTarget.RELATION_EMB_PGD.value,
+                PerturbTarget.SOFT_EDGE_PGD.value
+            ):
+                self._calculate_and_apply_perturbation(batch)
+
+            if self.perturb_target == PerturbTarget.RELATION_LINEAR.value:
+                perturbs = self._calculate_perturbation(self.model.model.model.layers[0].relation_linear)
+                perturbed_layer = self._generate_perturbed_layer(
+                    original_layer=self.model.model.model.layers[0].relation_linear,
+                    perturb=perturbs,
+                ).to(self.device)
+                self.model.model.model.perturbed_layer = perturbed_layer
+
+            if self.perturb_target == PerturbTarget.RELATION_LINEAR_ALL.value:
+                self.model.model.model.perturbed_layers = []
+                for i in range(len(self.model.model.model.layers)):
+                    perturbs = self._calculate_perturbation(
+                        self.model.model.model.layers[i].relation_linear
+                    )
+                    perturbed_layer = self._generate_perturbed_layer(
+                        original_layer=self.model.model.model.layers[i].relation_linear,
+                        perturb=perturbs,
+                    ).to(self.device)
+                    self.model.model.model.perturbed_layers.append(perturbed_layer)
+
+            if self.perturb_target == PerturbTarget.LINEAR.value:
+                perturbs = self._calculate_perturbation(
+                    self.model.model.model.layers[0].linear
+                )
+                perturbed_layer = self._generate_perturbed_layer(
+                    original_layer=self.model.model.model.layers[0].linear,
+                    perturb=perturbs
+                ).to(self.device)
+                self.model.model.model.perturbed_linear = perturbed_layer
+
+        if self.perturb_target:
+            # all_loss is not used or changed in CompositionalGraphConvolutionalNetwork so really doesn't matter
+            # this is mainly to have correct all_loss_perturbed
+            loss_perturbed = torch.tensor(0, dtype=torch.float32, device=self.device)
+            pred_perturbed, _ = self.predict_and_target(batch, loss_perturbed, metric)
+
+            if self.perturb_target in (PerturbTarget.RELATION_EMB.value, PerturbTarget.RELATION_EMB_PGD.value):
+                del self.model.model.query_override
+
+            elif self.perturb_target == PerturbTarget.RELATION_LINEAR.value:
+                del self.model.model.model.perturbed_layer
+
+            elif self.perturb_target == PerturbTarget.RELATION_LINEAR_ALL.value:
+                del self.model.model.model.perturbed_layers
+
+            elif self.perturb_target == PerturbTarget.LINEAR.value:
+                del self.model.model.model.perturbed_linear
+
+            elif self.perturb_target == PerturbTarget.SOFT_EDGE_PGD.value:
+                for layer in self.model.model.model.layers:
+                    del layer.edge_soft_drop
+
+            # TODO (ziyan): determine metrics for training. Currently, only metrics from valid and test is logged.
+            all_loss_perturbed, metric = self.calculate_loss(pred_perturbed, target, metric, loss_perturbed)
+            # todo: check weights
+            loss_total = all_loss + self.adversarial_strength * all_loss_perturbed
+
+            return loss_total, metric
 
         return all_loss, metric
+
+    def _calculate_perturbation(self, target):
+        if self.perturb_target == PerturbTarget.RELATION_EMB.value:
+            grad = target.weight.grad
+            return grad / (grad.norm(p=2, dim=1, keepdim=True) + 1e-8)
+
+        elif isinstance(target, torch.nn.modules.linear.Linear):
+            weight_grad = target.weight.grad
+            bias_grad = target.bias.grad
+            return (
+                self.noise_level * weight_grad / (weight_grad.norm(p=2, dim=1, keepdim=True) + 1e-8),
+                self.noise_level * bias_grad / (bias_grad.norm(p=2, keepdim=True) + 1e-8),
+            )
+
+        else:
+            raise ValueError(f"Unidentified types of perturbation target: {target}")
+
+    # TODO (ziyan): consolidate with usage of _calculate_perturbation
+    def _calculate_and_apply_perturbation(self, batch):
+        if self.perturb_target == PerturbTarget.RELATION_EMB_PGD.value:
+            _calculate_and_apply_attack_perturbation_pgd(
+                model=self,
+                attack_scale=self.noise_level,
+                pgd_steps=self.pgd_steps,
+                pgd_eps=self.pgd_eps,
+                batch=batch,
+            )
+
+        elif self.perturb_target == PerturbTarget.SOFT_EDGE_PGD.value:
+            _calculate_and_apply_attack_perturbation_pgd_soft_edge(
+                model=self,
+                attack_scale=self.noise_level,
+                pgd_steps=self.pgd_steps,
+                perturb_ratio=self.edge_ratio,
+                batch=batch,
+            )
+
+    @staticmethod
+    def _generate_perturbed_layer(original_layer, perturb):
+        weight_perturb, bias_perturb = perturb
+
+        perturbed_layer = torch.nn.Linear(
+            in_features=original_layer.in_features,
+            out_features=original_layer.out_features,
+            bias=original_layer.bias is not None
+        )
+        with torch.no_grad():
+            perturbed_layer.weight.copy_(original_layer.weight + weight_perturb)
+            if original_layer.bias is not None:
+                perturbed_layer.bias.copy_(original_layer.bias + bias_perturb)
+        return perturbed_layer
 
     def predict_and_target(self, batch, all_loss=None, metric=None):
         query = batch["query"]
@@ -99,6 +245,7 @@ class LogicalQuery(tasks.Task, core.Configurable):
             ranking = self.batch_evaluate(pred, target)
             # answer set cardinality prediction
             prob = F.sigmoid(pred)
+            # TODO: maintain probability
             num_pred = (prob * (prob > 0.5)).sum(dim=-1)
             num_easy = easy_answer.sum(dim=-1)
             num_hard = hard_answer.sum(dim=-1)
@@ -183,3 +330,82 @@ class LogicalQuery(tasks.Task, core.Configurable):
     def visualize(self, batch):
         query = batch["query"]
         return self.model.visualize(self.fact_graph, self.graph, query)
+
+    def calculate_loss(self, pred: torch.tensor, target: torch.tensor, metric: dict, all_loss: torch.tensor):
+        for criterion, weight in self.criterion.items():
+            if criterion == "bce":
+                loss = F.binary_cross_entropy_with_logits(pred, target, reduction="none")
+
+                is_positive = target > 0.5
+                is_negative = target <= 0.5
+                num_positive = is_positive.sum(dim=-1)
+                num_negative = is_negative.sum(dim=-1)
+                neg_weight = torch.zeros_like(pred)
+                neg_weight[is_positive] = (1 / num_positive.float()).repeat_interleave(num_positive)
+                if self.adversarial_temperature > 0:
+                    with torch.no_grad():
+                        logit = pred[is_negative] / self.adversarial_temperature
+                        neg_weight[is_negative] = functional.variadic_softmax(logit, num_negative)
+                else:
+                    neg_weight[is_negative] = (1 / num_negative.float()).repeat_interleave(num_negative)
+                loss = (loss * neg_weight).sum(dim=-1) / neg_weight.sum(dim=-1)
+            else:
+                raise ValueError("Unknown criterion `%s`" % criterion)
+
+            if self.sample_weight:
+                sample_weight = target.sum(dim=-1).float()
+                loss = (loss * sample_weight).sum() / sample_weight.sum()
+            else:
+                loss = loss.mean()
+
+            name = tasks._get_criterion_name(criterion)
+            metric[name] = loss
+            all_loss += loss * weight
+
+        return all_loss, metric
+
+
+def calculate_mutual_information_matrix(edge_index, edge_weight, num_nodes):
+    adj_matrix = retrieve_adjacency_matrix(edge_index=edge_index, edge_weight=edge_weight, num_nodes=num_nodes)
+    trans_prob_matrix = compute_transition_matrix(adj_matrix)
+    # T is order
+    T = 2
+    for _, t in enumerate(range(T)):
+        if _ == 0:
+            M = trans_prob_matrix
+        else:
+            M += torch.matrix_power(trans_prob_matrix, n=t+1)
+
+    # sum to reduce the rows
+    M_row_sum = M.sum(dim=0, keepdim=True) + 1e-8  # prevent division by 0
+    M_norm = M / M_row_sum
+    # TODO: verify this in paper
+    beta = 1 / num_nodes
+    beta_tensor = torch.tensor(beta, device=M_norm.device, dtype=M_norm.dtype)
+    mi = torch.log(M_norm) - torch.log(beta_tensor)
+    mi = torch.clamp(mi, min=0)
+    return mi
+
+
+def retrieve_adjacency_matrix(edge_index, edge_weight, num_nodes):
+    # TODO: the original method is applied on a undirected graph in the first place. This graph is directed.
+    #  Consider force to be a undirected graph.
+    #  However directly graph may be a more accurate.
+    #  This aligns with the decision on the edge embedding initiation.
+
+    adj_sparse = torch.sparse_coo_tensor(
+        indices=edge_index,
+        values=edge_weight,
+        size=(num_nodes, num_nodes)
+        # coalesce remove duplicated pairs of indices but reflect the multiple occurrences in matrix values
+        # by summing up their values. All original values (edge_weight) is 1.
+    ).coalesce()
+    return adj_sparse
+
+
+def compute_transition_matrix(adj_matrix):
+    # TODO: consider parse matrix implementation.
+    adj_dense = adj_matrix.to_dense()
+    row_sum = adj_dense.sum(dim=1, keepdim=True) + 1e-10
+    return adj_dense / row_sum
+

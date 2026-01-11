@@ -33,6 +33,18 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
                                                                activation, dependent))
 
     def forward(self, graph, input, all_loss=None, metric=None):
+        if hasattr(self, "perturbed_layer"):
+            original_layer = self.layers[0].relation_linear
+            self.layers[0].relation_linear = self.perturbed_layer
+        if hasattr(self, "perturbed_layers"):
+            original_layers = []
+            for i in range(len(self.perturbed_layers)):
+                original_layers.append(self.layers[i].relation_linear)
+                self.layers[i].relation_linear = self.perturbed_layers[i]
+        if hasattr(self, "perturbed_linear"):
+            original_layer = self.layers[0].linear
+            self.layers[0].linear = self.perturbed_linear
+
         with graph.node():
             graph.boundary = input
         hiddens = []
@@ -50,6 +62,14 @@ class NeuralBellmanFordNetwork(nn.Module, core.Configurable):
             node_feature = torch.cat(hiddens + [node_query], dim=-1)
         else:
             node_feature = torch.cat([hiddens[-1], node_query], dim=-1)
+
+        if hasattr(self, "perturbed_layer"):
+            self.layers[0].relation_linear = original_layer
+        if hasattr(self, "perturbed_layers"):
+            for i in range(len(self.perturbed_layers)):
+                self.layers[i].relation_linear = original_layers[i]
+        if hasattr(self, "perturbed_linear"):
+            self.layers[0].linear = original_layer
 
         return {
             "node_feature": node_feature,
@@ -75,6 +95,7 @@ class CompositionalGraphConvolutionalNetwork(nn.Module, core.Configurable):
 
         self.layers = nn.ModuleList()
         for i in range(len(self.dims) - 1):
+            # TODO (ziyan): message and aggregate in CompositionalGraphConv
             self.layers.append(layer.CompositionalGraphConv(self.dims[i], self.dims[i + 1], num_relation,
                                                             message_func, layer_norm, activation))
         self.relation = nn.Embedding(num_relation, input_dim)

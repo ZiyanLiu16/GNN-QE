@@ -22,17 +22,32 @@ task:
   criterion: bce
   sample_weight: no
   adversarial_temperature: 0.2
+  adversarial_strength: 0.5
+  perturb_target: soft_edge_pgd # linear # see PerturbTarget,
+  mutual_info_weighted_perturb: False
+  noise_level: .4
+  pgd_eps: 1
+  pgd_steps: 3
+  edge_ratio: 0.05
 
 optimizer:
   class: Adam
-  lr: 5.0e-3
+  lr: 2.5e-3 #5.0e-3
 
 engine:
   gpus: {{ gpus }}
-  batch_size: 48
+  batch_size: 16
 
 train:
   num_epoch: 10
   batch_per_epoch: 1000
 
 metric: mrr
+
+evaluate: ""
+#  checkpoint: ~/projects/graph_neural_network_query_executor/models/model_original/model_epoch_10.pth
+#  attack_method: relation_emb_pgd #soft_edge_pgd
+#  attack_scale: 0.4
+#  pgd_eps: 3
+#  pgd_steps: 5
+#  edge_ratio: 0.05

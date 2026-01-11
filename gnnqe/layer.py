@@ -1,3 +1,4 @@
+import numpy as np
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -18,7 +19,7 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
     }
 
     def __init__(self, input_dim, output_dim, num_relation, query_input_dim, message_func="distmult",
-                 aggregate_func="pna", layer_norm=False, activation="relu", dependent=True):
+                 aggregate_func="pna", layer_norm=False, activation="relu", dependent=True, pgd_perturb=None):
         super(GeneralizedRelationalConv, self).__init__()
         self.input_dim = input_dim
         self.output_dim = output_dim
@@ -78,7 +79,13 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
     def aggregate(self, graph, message):
         node_out = graph.edge_list[:, 1]
         node_out = torch.cat([node_out, torch.arange(graph.num_node, device=graph.device)])
-        edge_weight = torch.cat([graph.edge_weight, torch.ones(graph.num_node, device=graph.device)])
+
+        edge_weight = graph.edge_weight
+        if hasattr(self, "edge_soft_drop"):
+            edge_weight = edge_weight * (1 - self.edge_soft_drop) * self.edge_mask
+
+        # ones are self weight. no need to perturb.
+        edge_weight = torch.cat([edge_weight, torch.ones(graph.num_node, device=graph.device)])
         edge_weight = edge_weight.unsqueeze(-1).unsqueeze(-1)
         degree_out = graph.degree_out.unsqueeze(-1).unsqueeze(-1) + 1
 
@@ -90,7 +97,7 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
             update = scatter_max(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)[0]
         elif self.aggregate_func == "pna":
             mean = scatter_mean(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)
-            sq_mean = scatter_mean(message ** 2 * edge_weight, node_out, dim=0, dim_size=graph.num_node)
+            sq_mean = scatter_mean((message * edge_weight) ** 2 , node_out, dim=0, dim_size=graph.num_node)
             max = scatter_max(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)[0]
             min = scatter_min(message * edge_weight, node_out, dim=0, dim_size=graph.num_node)[0]
             std = (sq_mean - mean ** 2).clamp(min=self.eps).sqrt()
@@ -121,7 +128,16 @@ class GeneralizedRelationalConv(layers.MessagePassingBase):
             relation_input = relation_input.transpose(0, 1).flatten(1)
         else:
             relation_input = self.relation.weight.repeat(1, batch_size)
-        adjacency = graph.adjacency.transpose(0, 1)
+
+        adjacency = graph.adjacency
+        if hasattr(self, "edge_soft_drop"):
+            indices = adjacency._indices()
+            values  = adjacency._values()
+            drop = self.edge_soft_drop.to(values.device, values.dtype)
+            values_tilde = values * (1.0 - drop)
+            adjacency = torch.sparse_coo_tensor(indices, values_tilde, adjacency.size(), device=adjacency.device)
+
+        adjacency = adjacency.transpose(0, 1)
 
         if self.message_func in self.message2mul:
             mul = self.message2mul[self.message_func]
@@ -243,11 +259,20 @@ class CompositionalGraphConv(layers.MessagePassingBase):
         relation_input = relation_input.repeat(1, batch_size)
         node_in, node_out, relation = graph.edge_list.t()
         edge_weight = graph.edge_weight * 2 / (graph.degree_in[node_in] * graph.degree_out[node_out]) ** 0.5
+
+        # concat edge with self-edge
         edge_weight = torch.cat([edge_weight, torch.ones(graph.num_node, device=self.device)])
         node_in = torch.cat([node_in, torch.arange(graph.num_node, device=self.device)])
+        # expand to differentiate in-edge, out-edge and edge to self
+        # first part includes in-edge and out-edge (relation % 2)
+        # second part is self-edge
         node_out = torch.cat([node_out * 3 + relation % 2, torch.arange(graph.num_node, device=self.device) * 3 + 2])
+
+        # edge to self relation
         loop = torch.ones(graph.num_node, dtype=torch.long, device=self.device) * graph.num_relation
         relation = torch.cat([relation, loop])
+
+        # in last step of perturbation, use concrete masking sampling by the probabilities determined by s.
         adjacency = utils.sparse_coo_tensor(torch.stack([node_in, node_out, relation]), edge_weight,
                                             (graph.num_node, graph.num_node * 3, graph.num_relation + 1))
         adjacency = adjacency.transpose(0, 1)

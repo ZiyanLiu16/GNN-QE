@@ -50,9 +50,16 @@ class QueryExecutor(nn.Module, core.Configurable):
 
         is_sampled = torch.rand(len(edge_index), device=self.device) <= self.dropout_ratio
         edge_index = edge_index[is_sampled]
-
         edge_mask = ~functional.as_mask(edge_index, graph.num_edge)
-        return graph.edge_mask(edge_mask)
+
+        # when use edge_soft_mask, apply mask as zero weight
+        if hasattr(self.model.model.layers[0], "edge_soft_drop"):
+            edge_mask = edge_mask.float()
+            for layer in self.model.model.layers:
+                layer.edge_mask = edge_mask
+            return graph
+        else:
+            return graph.edge_mask(edge_mask)
 
     def execute(self, graph, query, all_loss=None, metric=None):
         """Execute queries on the graph."""
@@ -165,6 +172,7 @@ class QueryExecutor(nn.Module, core.Configurable):
 
         # detach the variable to stabilize training
         h_prob = h_prob.detach()
+        # this projection can happen multiple times during forward.
         t_prob = self.model(graph, h_prob, r_index, all_loss=all_loss, metric=metric)
         sym_t_prob = self.symbolic_model(graph, sym_h_prob, r_index, all_loss=all_loss, metric=metric)
 
@@ -205,11 +213,16 @@ class RelationProjection(nn.Module, core.Configurable):
     def __init__(self, model, num_mlp_layer=2):
         super(RelationProjection, self).__init__()
         self.model = model
+        # model.num_relation is number of the unique types of relation
         self.query = nn.Embedding(model.num_relation, model.input_dim)
         self.mlp = layers.MLP(model.output_dim, [model.output_dim] * (num_mlp_layer - 1) + [1])
 
     def forward(self, graph, h_prob, r_index, all_loss=None, metric=None):
-        query = self.query(r_index)
+        if hasattr(self, "query_override"):
+            query = self.query_override[r_index]
+        else:
+            query = self.query(r_index)
+
         graph = graph.clone()
         with graph.graph():
             graph.query = query
